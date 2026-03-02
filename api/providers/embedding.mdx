@@ -1,0 +1,388 @@
+---
+title: Embedding Providers
+description: Text embedding implementations for OneClaw's vector memory system
+---
+
+## Overview
+
+OneClaw supports 2 embedding providers for generating dense vector representations of text:
+
+| Provider | Default Model | Dimensions | Endpoint |
+|----------|--------------|------------|----------|
+| **OllamaEmbedding** | `nomic-embed-text` | 768 | `http://localhost:11434` |
+| **OpenAIEmbedding** | `text-embedding-3-small` | 1536 | `https://api.openai.com` |
+
+Embeddings are used by the vector memory system for semantic search and similarity matching.
+
+---
+
+## OllamaEmbedding
+
+**Local, offline-capable embedding generation using Ollama.**
+
+### Configuration
+
+```rust
+use oneclaw_core::provider::embedding::{EmbeddingConfig, build_embedding_provider};
+
+// With defaults (localhost:11434, nomic-embed-text)
+let config = EmbeddingConfig::default();
+let provider = build_embedding_provider(&config)?;
+
+// Custom configuration
+let config = EmbeddingConfig {
+    provider: "ollama".into(),
+    model: "nomic-embed-text".into(),
+    endpoint: "http://localhost:11434".into(),
+    api_key: None, // Not needed for Ollama
+    timeout_secs: 30,
+};
+let provider = build_embedding_provider(&config)?;
+```
+
+### TOML Configuration
+
+```toml
+[embedding]
+provider = "ollama"
+model = "nomic-embed-text"
+endpoint = "http://localhost:11434"
+timeout_secs = 30
+```
+
+### Supported Models
+
+| Model | Dimensions | Use Case |
+|-------|------------|----------|
+| `nomic-embed-text` | 768 | **Default** - General purpose, good quality |
+| `all-minilm` | 384 | Smaller, faster, lower quality |
+| `mxbai-embed-large` | 1024 | Higher quality, larger |
+| `snowflake-arctic-embed` | 1024 | Alternative high-quality option |
+
+### API Format
+
+**Endpoint:** `POST /api/embed`
+
+**Request:**
+```json
+{
+  "model": "nomic-embed-text",
+  "input": ["Hello, world!"]
+}
+```
+
+**Response:**
+```json
+{
+  "embeddings": [
+    [0.123, -0.456, 0.789, ...] // 768 dimensions
+  ]
+}
+```
+
+### Usage Example
+
+```rust
+use oneclaw_core::provider::EmbeddingProvider;
+use oneclaw_core::provider::embedding_ollama::OllamaEmbedding;
+
+// Create provider
+let provider = OllamaEmbedding::with_defaults()?;
+
+// Check availability
+if !provider.is_available() {
+    eprintln!("Ollama not running at localhost:11434");
+    return;
+}
+
+// Generate single embedding
+let embedding = provider.embed("The weather is sunny today")?;
+assert_eq!(embedding.dim(), 768);
+
+// Generate batch embeddings
+let texts = &[
+    "Hello, world!",
+    "How are you?",
+    "Goodbye!"
+];
+let embeddings = provider.embed_batch(texts)?;
+assert_eq!(embeddings.len(), 3);
+
+println!("Model: {}", provider.model_id()); // "ollama:nomic-embed-text"
+```
+
+### Performance Characteristics
+
+**Latency (localhost):**
+- Single embedding: ~50-200ms
+- Batch of 10: ~200-500ms
+
+**Hardware Requirements:**
+- RPi 4 (4GB): Works well with `nomic-embed-text` (768d)
+- Desktop/Server: Can use larger models (1024d)
+
+**Advantages:**
+- Fully offline
+- No API costs
+- Privacy-preserving (data never leaves device)
+- Fast for local inference
+
+**Disadvantages:**
+- Requires Ollama running locally
+- Lower quality than OpenAI models
+- Requires model to be pulled first (`ollama pull nomic-embed-text`)
+
+---
+
+## OpenAIEmbedding
+
+**Cloud-based, high-quality embedding generation using OpenAI's API.**
+
+### Configuration
+
+```rust
+use oneclaw_core::provider::embedding::{EmbeddingConfig, build_embedding_provider};
+
+let config = EmbeddingConfig {
+    provider: "openai".into(),
+    model: "text-embedding-3-small".into(),
+    endpoint: "https://api.openai.com".into(),
+    api_key: Some("sk-...".into()),
+    timeout_secs: 30,
+};
+
+let provider = build_embedding_provider(&config)?;
+```
+
+### TOML Configuration
+
+```toml
+[embedding]
+provider = "openai"
+model = "text-embedding-3-small"
+api_key = "sk-..."  # Or use api_key_env = "OPENAI_API_KEY"
+endpoint = "https://api.openai.com"
+timeout_secs = 30
+```
+
+### Supported Models
+
+| Model | Dimensions | Cost (per 1M tokens) | Use Case |
+|-------|------------|---------------------|----------|
+| `text-embedding-3-small` | 1536 | $0.02 | **Default** - Balanced quality/cost |
+| `text-embedding-3-large` | 3072 | $0.13 | Highest quality |
+| `text-embedding-ada-002` | 1536 | $0.10 | Legacy model |
+
+### API Key Resolution
+
+Priority order:
+1. `config.api_key` (explicit in code/TOML)
+2. `OPENAI_API_KEY` environment variable
+3. Error if none found
+
+### API Format
+
+**Endpoint:** `POST /v1/embeddings`
+
+**Request:**
+```json
+{
+  "model": "text-embedding-3-small",
+  "input": ["Hello, world!"]
+}
+```
+
+**Response:**
+```json
+{
+  "data": [
+    {
+      "embedding": [0.123, -0.456, 0.789, ...], // 1536 dimensions
+      "index": 0
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 4,
+    "total_tokens": 4
+  }
+}
+```
+
+### Usage Example
+
+```rust
+use oneclaw_core::provider::EmbeddingProvider;
+use oneclaw_core::provider::embedding::{EmbeddingConfig, build_embedding_provider};
+
+// Create provider
+let config = EmbeddingConfig {
+    provider: "openai".into(),
+    model: "text-embedding-3-small".into(),
+    api_key: Some(std::env::var("OPENAI_API_KEY").unwrap()),
+    endpoint: "https://api.openai.com".into(),
+    timeout_secs: 30,
+};
+
+let provider = build_embedding_provider(&config)?;
+
+// Generate single embedding
+let embedding = provider.embed("The weather is sunny today")?;
+assert_eq!(embedding.dim(), 1536);
+
+// Generate batch embeddings (efficient batching)
+let texts = &[
+    "Hello, world!",
+    "How are you?",
+    "Goodbye!"
+];
+let embeddings = provider.embed_batch(texts)?;
+assert_eq!(embeddings.len(), 3);
+
+println!("Model: {}", provider.model_id()); // "openai:text-embedding-3-small"
+```
+
+### Performance Characteristics
+
+**Latency (internet):**
+- Single embedding: ~100-500ms
+- Batch of 10: ~200-800ms
+
+**Advantages:**
+- Highest quality embeddings
+- No local infrastructure required
+- Efficient batch processing
+- Reliable uptime
+
+**Disadvantages:**
+- Requires internet connection
+- API costs per token
+- Data sent to cloud
+- Requires API key management
+
+---
+
+## Comparing Providers
+
+### Quality
+
+**OpenAI** (1536d) > **Ollama Large** (1024d) > **Ollama Default** (768d) > **Ollama Small** (384d)
+
+### Cost
+
+**Ollama** (free, local compute) vs **OpenAI** ($0.02 per 1M tokens)
+
+### Privacy
+
+**Ollama** (fully local) vs **OpenAI** (cloud-based)
+
+### Use Cases
+
+#### Choose OllamaEmbedding when:
+- Running on edge/IoT devices
+- Privacy is critical
+- No internet available
+- Cost must be zero
+- Lower quality is acceptable
+
+#### Choose OpenAIEmbedding when:
+- Highest quality needed
+- Internet available
+- Budget allows API costs
+- Reliability critical
+
+---
+
+## Dimension Compatibility
+
+**Important:** Embeddings from different models are NOT compatible:
+
+```rust
+// ❌ DON'T MIX MODELS
+let ollama_provider = OllamaEmbedding::with_defaults()?; // 768d
+let openai_provider = OpenAIEmbedding::new(&openai_config)?; // 1536d
+
+let emb1 = ollama_provider.embed("hello")?; // 768d
+let emb2 = openai_provider.embed("hello")?; // 1536d
+
+// Cannot compare or search across these embeddings!
+
+// ✅ DO USE SAME MODEL
+let all_embeddings = ollama_provider.embed_batch(&[
+    "hello",
+    "world",
+    "test"
+])?; // All 768d, compatible
+```
+
+**Recommendation:** Choose one embedding model and stick with it for your vector memory. If you change models, you must regenerate all embeddings.
+
+---
+
+## Building from Config
+
+### Parse from TOML
+
+```rust
+use oneclaw_core::provider::embedding::{parse_embedding_config, build_embedding_provider};
+
+let toml_str = r#"
+    [embedding]
+    provider = "ollama"
+    model = "nomic-embed-text"
+    endpoint = "http://localhost:11434"
+"#;
+
+let toml_value: toml::Value = toml_str.parse()?;
+let config = parse_embedding_config(&toml_value)?;
+let provider = build_embedding_provider(&config)?;
+
+assert_eq!(provider.id(), "ollama");
+assert_eq!(provider.dimensions(), 768);
+```
+
+### Environment Variables
+
+```toml
+[embedding]
+provider = "openai"
+model = "text-embedding-3-small"
+api_key_env = "OPENAI_API_KEY"  # Read from environment
+```
+
+```bash
+export OPENAI_API_KEY="sk-..."
+# Config will automatically read from env var
+```
+
+---
+
+## Integration with Vector Memory
+
+Embedding providers are used by OneClaw's vector memory system:
+
+```rust
+use oneclaw_core::memory::VectorMemory;
+use oneclaw_core::provider::embedding::build_embedding_provider;
+
+// Create embedding provider
+let embedding_config = EmbeddingConfig::default();
+let embedding_provider = build_embedding_provider(&embedding_config)?;
+
+// Create vector memory with embedding provider
+let memory = VectorMemory::new(
+    embedding_provider,
+    100, // max entries
+)?;
+
+// Store memories (automatically embedded)
+memory.store("user123", "Temperature is 25°C", None)?;
+memory.store("user123", "Heart rate is 72 bpm", None)?;
+
+// Search by semantic similarity (automatically embeds query)
+let results = memory.search("user123", "What is the temperature?", 5)?;
+for result in results {
+    println!("{} (score: {:.2})", result.content, result.score);
+}
+```
+
+See the Vector Memory API documentation for more details.

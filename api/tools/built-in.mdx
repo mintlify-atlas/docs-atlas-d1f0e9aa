@@ -1,0 +1,288 @@
+---
+title: Built-in Tools
+description: Standard tool implementations provided by oneclaw-tools
+---
+
+## Overview
+
+OneClaw provides three built-in tools that cover common agent needs: system information reporting, workspace file writing, and notifications.
+
+**Source**: `/home/daytona/workspace/source/crates/oneclaw-tools/src/`
+
+## SystemInfoTool
+
+Reports system information such as OS, memory usage, and uptime.
+
+**Category**: `system`  
+**Source**: `/home/daytona/workspace/source/crates/oneclaw-tools/src/system_info.rs:8`
+
+### Constructor
+
+```rust
+SystemInfoTool::new() -> Self
+```
+
+### Parameters
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `section` | String | No | What to report: `all`, `os`, `memory`, `uptime` (default: `all`) |
+
+### Output Format
+
+Returns formatted system information based on the requested section:
+
+- **`os`**: Operating system and architecture
+- **`uptime`**: System uptime in hours and minutes
+- **`memory`**: Memory usage (used/total in MB)
+- **`all`**: All of the above
+
+### Metadata
+
+- `section`: The section that was requested
+
+### Usage
+
+```rust
+use oneclaw_tools::SystemInfoTool;
+use std::collections::HashMap;
+
+let tool = SystemInfoTool::new();
+
+// Get all system info
+let result = tool.execute(&HashMap::new()).unwrap();
+println!("{}", result.output);
+// Output:
+// OS: linux x86_64
+// Uptime: 5h 23m
+// Memory: 2048 MB used / 8192 MB total
+
+// Get only OS info
+let mut params = HashMap::new();
+params.insert("section".to_string(), "os".to_string());
+let result = tool.execute(&params).unwrap();
+println!("{}", result.output);
+// Output: OS: linux x86_64
+```
+
+### Platform Support
+
+Reads `/proc/uptime` and `/proc/meminfo` for uptime and memory information. Falls back to "unknown" or "info not available" on non-Linux systems.
+
+---
+
+## FileWriteTool
+
+Writes content to files within a sandboxed workspace directory.
+
+**Category**: `io`  
+**Source**: `/home/daytona/workspace/source/crates/oneclaw-tools/src/file_write.rs:10`
+
+### Constructor
+
+```rust
+FileWriteTool::new(workspace: impl Into<PathBuf>) -> Self
+```
+
+**Parameters**:
+- `workspace`: The root directory for file operations (security boundary)
+
+### Parameters
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `path` | String | Yes | Relative file path within workspace |
+| `content` | String | Yes | Content to write to the file |
+| `mode` | String | No | Write mode: `overwrite` (default) or `append` |
+
+### Security
+
+- **Path validation**: Paths containing `..` are rejected
+- **Workspace boundary**: Resolved paths must remain within workspace
+- **Automatic directory creation**: Parent directories are created if needed
+
+### Metadata
+
+- `path`: The relative path written
+- `bytes`: Number of bytes written
+- `mode`: Write mode used (`overwrite` or `append`)
+
+### Usage
+
+```rust
+use oneclaw_tools::FileWriteTool;
+use std::collections::HashMap;
+use std::path::PathBuf;
+
+let workspace = PathBuf::from("/workspace");
+let tool = FileWriteTool::new(workspace);
+
+// Write a new file
+let mut params = HashMap::new();
+params.insert("path".to_string(), "output.txt".to_string());
+params.insert("content".to_string(), "Hello, world!".to_string());
+
+let result = tool.execute(&params).unwrap();
+assert!(result.success);
+println!("{}", result.output);
+// Output: Wrote 13 bytes to output.txt
+
+// Append to existing file
+params.insert("mode".to_string(), "append".to_string());
+params.insert("content".to_string(), "\nMore content".to_string());
+
+let result = tool.execute(&params).unwrap();
+println!("{}", result.output);
+// Output: Appended 13 bytes to output.txt
+
+// Path escape attempt (blocked)
+params.insert("path".to_string(), "../../etc/passwd".to_string());
+let result = tool.execute(&params).unwrap();
+assert!(!result.success);
+assert!(result.output.contains("escape"));
+```
+
+### Nested Directories
+
+The tool automatically creates parent directories:
+
+```rust
+let mut params = HashMap::new();
+params.insert("path".to_string(), "logs/2026/march.log".to_string());
+params.insert("content".to_string(), "Log entry\n".to_string());
+
+let result = tool.execute(&params).unwrap();
+// Creates /workspace/logs/2026/ if needed, then writes march.log
+```
+
+---
+
+## NotifyTool
+
+Sends notifications via file-based alert log and tracing.
+
+**Category**: `notify`  
+**Source**: `/home/daytona/workspace/source/crates/oneclaw-tools/src/notify.rs:13`
+
+### Constructors
+
+```rust
+// Default: logs to data/alerts.log
+NotifyTool::new() -> Self
+
+// Custom log path
+NotifyTool::with_log_path(path: impl Into<PathBuf>) -> Self
+```
+
+### Parameters
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `message` | String | Yes | Notification message |
+| `urgency` | String | No | `low`, `normal`, `high`, `critical` (default: `normal`) |
+| `recipient` | String | No | Who to notify (default: `system`) |
+
+### Behavior
+
+1. **Tracing log**: Emits INFO-level log with urgency and recipient
+2. **Alert log file**: Appends timestamped entry to alert log
+
+### Alert Log Format
+
+```
+[YYYY-MM-DD HH:MM:SS UTC] [urgency] recipient: message
+```
+
+Example:
+```
+[2026-03-02 14:23:45 UTC] [critical] doctor: Heart rate above threshold: 145 bpm
+[2026-03-02 14:30:12 UTC] [normal] system: Medication reminder
+```
+
+### Metadata
+
+- `urgency`: The urgency level
+- `recipient`: The notification recipient
+- `log_path`: Path to the alert log file
+
+### Usage
+
+```rust
+use oneclaw_tools::NotifyTool;
+use std::collections::HashMap;
+
+let tool = NotifyTool::new();
+
+// Simple notification
+let mut params = HashMap::new();
+params.insert("message".to_string(), "Task completed".to_string());
+
+let result = tool.execute(&params).unwrap();
+println!("{}", result.output);
+// Output: Notification sent to system [normal]: Task completed (logged to data/alerts.log)
+
+// High-urgency notification to specific recipient
+params.insert("urgency".to_string(), "high".to_string());
+params.insert("recipient".to_string(), "caregiver".to_string());
+params.insert("message".to_string(), "Fall detected".to_string());
+
+let result = tool.execute(&params).unwrap();
+assert!(result.success);
+assert_eq!(result.metadata.get("urgency"), Some(&"high".to_string()));
+```
+
+### Custom Log Path
+
+```rust
+use std::path::PathBuf;
+
+let log_path = PathBuf::from("/var/log/oneclaw/alerts.log");
+let tool = NotifyTool::with_log_path(log_path);
+
+let mut params = HashMap::new();
+params.insert("message".to_string(), "System started".to_string());
+
+let result = tool.execute(&params).unwrap();
+// Alert written to /var/log/oneclaw/alerts.log
+```
+
+### Tracing Integration
+
+Notifications are also logged via `tracing::info!` for integration with logging infrastructure:
+
+```
+2026-03-02T14:23:45Z INFO urgency=high recipient=caregiver NOTIFICATION: Fall detected
+```
+
+---
+
+## Registration Example
+
+Register all built-in tools:
+
+```rust
+use oneclaw_core::tool::ToolRegistry;
+use oneclaw_tools::{SystemInfoTool, FileWriteTool, NotifyTool};
+use std::path::PathBuf;
+
+let mut registry = ToolRegistry::new();
+
+// Register system info tool
+registry.register(Box::new(SystemInfoTool::new()));
+
+// Register file writer with workspace path
+let workspace = PathBuf::from("/home/agent/workspace");
+registry.register(Box::new(FileWriteTool::new(workspace)));
+
+// Register notification tool with custom log path
+let alert_log = PathBuf::from("/var/log/alerts.log");
+registry.register(Box::new(NotifyTool::with_log_path(alert_log)));
+
+println!("Registered {} tools", registry.count());
+// Output: Registered 3 tools
+```
+
+## See Also
+
+- [Tool Trait](/api/tools/traits) - Implementing custom tools
+- [ToolRegistry](/api/tools/registry) - Tool registration and execution

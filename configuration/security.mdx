@@ -1,0 +1,383 @@
+---
+title: Security Configuration
+description: Configure deny-by-default access control, pairing, and rate limiting
+---
+
+OneClaw implements **deny-by-default security**: all actions are blocked unless explicitly authorized. This is critical for edge deployments where devices may be exposed to untrusted networks.
+
+## Security Model
+
+OneClaw's security layer (L0) enforces:
+
+1. **Deny-by-default**: Unpaired devices are rejected
+2. **Device pairing**: One-time codes with TTL
+3. **Workspace scoping**: File access limited to workspace directory
+4. **Rate limiting**: DoS prevention
+5. **Command authorization**: Per-action access control
+
+## Basic Configuration
+
+Minimal security configuration:
+
+```toml
+[security]
+deny_by_default = true
+```
+
+This enables deny-by-default mode. All unpaired devices are rejected.
+
+## deny_by_default Setting
+
+The `deny_by_default` flag controls the core security posture:
+
+```toml
+[security]
+deny_by_default = true   # Production mode (recommended)
+```
+
+```toml
+[security]
+deny_by_default = false  # Development mode (no pairing required)
+```
+
+### Production Mode (`deny_by_default = true`)
+
+- **All devices must pair** before executing commands
+- Unpaired devices receive: `Device 'xyz' not paired. Pair first.`
+- System actor (`system`) bypasses pairing for internal operations
+
+### Development Mode (`deny_by_default = false`)
+
+- **No pairing required** (convenience for testing)
+- All devices granted access (workspace-only still enforced)
+- Use only in trusted environments
+
+## Pairing Configuration
+
+Device pairing uses one-time codes with time-to-live (TTL):
+
+```toml
+[security]
+deny_by_default = true
+pairing_required = true    # Require pairing before access
+workspace_only = true      # Restrict file access to workspace
+persist_pairing = true     # Survive restarts
+persist_path = "data/security.db"  # SQLite pairing database
+```
+
+### Pairing Flow
+
+1. **Generate code**: User runs `pair` command
+   ```
+   > pair
+   Pairing code: A3F9K2
+   Expires in 5 minutes.
+   ```
+
+2. **Verify code**: Device submits code via `verify <code>`
+   ```
+   > verify A3F9K2
+   ✓ Device paired: cli-abc123
+   ```
+
+3. **Device authorized**: Device can now execute commands
+
+### Pairing Code Properties
+
+- **6-character alphanumeric** (e.g., `A3F9K2`)
+- **One-time use**: Code invalidated after verification
+- **TTL**: Expires after 5 minutes (configurable)
+- **Cryptographically random**: No guessable patterns
+
+### Persistence Options
+
+**SQLite persistence (recommended):**
+
+```toml
+[security]
+persist_pairing = true
+persist_path = "data/security.db"
+```
+
+Paired devices survive restarts. Database stores:
+- Device ID
+- Paired timestamp
+- Label (optional)
+- Last seen timestamp
+
+**In-memory only:**
+
+```toml
+[security]
+persist_pairing = false
+```
+
+Paired devices lost on restart. Use for temporary/development setups.
+
+## Workspace Scoping
+
+The `workspace_only` setting restricts file operations:
+
+```toml
+[security]
+workspace_only = true  # Recommended for edge devices
+```
+
+When enabled:
+
+- **Read/Write** operations must be within workspace directory
+- Attempting `/etc/passwd` access: `Denied: path outside workspace`
+- Symlinks are resolved and validated
+
+When disabled (`workspace_only = false`):
+
+- File operations allowed system-wide (use with caution)
+- Still subject to OS-level permissions
+
+### Workspace Path
+
+Workspace is the directory where OneClaw is launched:
+
+```bash
+cd /opt/oneclaw
+./oneclaw-core  # Workspace = /opt/oneclaw
+```
+
+All file paths are validated against this workspace root.
+
+## Rate Limiting
+
+OneClaw includes a token-bucket rate limiter to prevent DoS:
+
+```rust
+RateLimiter::new(max_per_minute)
+```
+
+Typical configuration:
+
+- **CLI channel**: 60 requests/minute (1 per second)
+- **TCP channel**: 300 requests/minute (5 per second)
+- **MQTT channel**: 1000 requests/minute (16 per second)
+
+Rate limits are per-channel, not global.
+
+### How Rate Limiting Works
+
+1. Each request increments counter
+2. Counter resets every 60 seconds (sliding window)
+3. Requests over limit are rejected: `Rate limit exceeded`
+
+Rate limiting is **automatic** and not configurable via TOML (set in code).
+
+## Command Authorization
+
+Each command is checked against security policies:
+
+### Action Kinds
+
+| Action | Description | Security Check |
+|--------|-------------|---------------|
+| `PairDevice` | Device pairing | Always allowed |
+| `Read` | File read | Workspace check + pairing |
+| `Write` | File write | Workspace check + pairing |
+| `Execute` | Command execution | Pairing only |
+| `Network` | Network access | Pairing only |
+
+### Authorization Flow
+
+```rust
+Action {
+  actor: "cli-abc123",      // Device ID
+  kind: ActionKind::Read,   // What they want
+  resource: "sensors.db",   // What they want to access
+}
+```
+
+1. **Pairing check**: Is device paired? (skip for `PairDevice`)
+2. **Action-specific check**: Path validation, etc.
+3. **Return permit**: `{ granted: true, reason: "..." }`
+
+## Device Management
+
+### List Paired Devices
+
+View all paired devices:
+
+```bash
+devices
+```
+
+Output:
+
+```
+Paired Devices:
+  cli-abc123  (paired 2h ago)
+  telegram-xyz (paired 1d ago)
+```
+
+### Remove Device
+
+Unpair a device by prefix:
+
+```bash
+unpair cli-a
+```
+
+Output:
+
+```
+✓ Removed device: cli-abc123
+```
+
+Device must re-pair to regain access.
+
+### Prefix Matching
+
+Device IDs can be specified by prefix:
+
+- `unpair cli-a` matches `cli-abc123`
+- Ambiguous prefixes rejected: `Ambiguous: 'cli' matches 2 devices`
+
+## Example Configurations
+
+### Production Edge Device (Raspberry Pi)
+
+```toml
+[security]
+deny_by_default = true         # Deny unpaired devices
+pairing_required = true        # Require pairing
+workspace_only = true          # Restrict to /opt/oneclaw
+persist_pairing = true         # Survive restarts
+persist_path = "data/security.db"  # SQLite persistence
+```
+
+### Development / Testing
+
+```toml
+[security]
+deny_by_default = false        # No pairing required
+pairing_required = false       # Skip pairing
+workspace_only = true          # Still restrict filesystem
+persist_pairing = false        # In-memory only
+```
+
+### High-Security Industrial IoT
+
+```toml
+[security]
+deny_by_default = true         # Deny by default
+pairing_required = true        # Require pairing
+workspace_only = true          # Restrict to workspace
+persist_pairing = true         # Persistent pairing
+persist_path = "/var/lib/oneclaw/security.db"  # System-wide DB
+```
+
+### Temporary Edge Device (No Persistence)
+
+```toml
+[security]
+deny_by_default = true         # Deny unpaired devices
+pairing_required = true        # Require pairing
+workspace_only = true          # Restrict to workspace
+persist_pairing = false        # In-memory only (lost on restart)
+```
+
+## Security Best Practices
+
+### For Production Edge Devices
+
+1. **Always enable `deny_by_default = true`**
+2. **Enable `persist_pairing = true`** to avoid re-pairing after restarts
+3. **Use `workspace_only = true`** to limit file access
+4. **Store `persist_path`** on persistent storage (not tmpfs)
+5. **Pair devices on secure network** (local access, not over internet)
+
+### For Development
+
+1. Use `deny_by_default = false` for convenience
+2. Keep `workspace_only = true` even in dev mode
+3. Use `persist_pairing = false` to auto-reset between sessions
+
+### Device Pairing Security
+
+1. **Pairing codes expire** after 5 minutes
+2. **One-time use**: Cannot reuse verified codes
+3. **Generate on trusted interface** (e.g., CLI, not MQTT)
+4. **Verify over secure channel** (e.g., local console, not public chat)
+
+## API Key Security
+
+API keys in config files are **never logged** in plain text:
+
+```rust
+Debug: api_key: "sk-a...xyz"  // Masked: first 4 + last 3 chars
+```
+
+Keys in config files should be:
+
+- **File permissions**: `chmod 600 config/default.toml`
+- **Not committed to git**: Add to `.gitignore`
+- **Use env vars** for CI/CD: `ANTHROPIC_API_KEY=...`
+
+## Troubleshooting
+
+### "Device not paired"
+
+Device must pair before executing commands:
+
+```bash
+pair              # Generate code
+verify ABC123     # Device submits code
+```
+
+### "Path outside workspace"
+
+File operation attempted outside workspace directory:
+
+```bash
+read /etc/passwd  # Denied: path outside workspace
+```
+
+Ensure paths are relative or within workspace:
+
+```bash
+read sensors.db   # OK: relative to workspace
+```
+
+### Lost pairing after restart
+
+Enable persistence:
+
+```toml
+[security]
+persist_pairing = true
+persist_path = "data/security.db"
+```
+
+### Pairing code expired
+
+Generate a new code:
+
+```bash
+pair  # New code with fresh 5-minute TTL
+```
+
+## Security Threat Model
+
+OneClaw's security is designed for:
+
+- **Untrusted local networks** (home WiFi, etc.)
+- **Accidental misconfiguration** (wrong command target)
+- **Basic DoS attacks** (rate limiting)
+
+OneClaw is **not designed for**:
+
+- **Nation-state adversaries**
+- **Physical access attacks** (device compromise)
+- **Zero-day exploits in Rust/dependencies**
+
+For high-security applications, deploy OneClaw behind:
+
+- **Network firewall** (restrict ingress to trusted IPs)
+- **VPN/WireGuard** for remote access
+- **TLS termination** for TCP channels

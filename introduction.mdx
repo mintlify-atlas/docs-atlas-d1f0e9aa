@@ -1,0 +1,114 @@
+---
+title: OneClaw - Edge AI Agent Kernel
+description: A lightweight, secure, trait-driven AI agent runtime built in Rust for resource-constrained edge devices
+---
+
+# OneClaw — Edge AI Agent Kernel
+
+A lightweight, secure, trait-driven AI agent runtime built in Rust. Designed for resource-constrained edge devices: smart home hubs, industrial IoT gateways, agricultural sensor networks, and any domain needing AI + Edge + Realtime.
+
+**Domain-agnostic** — use as foundation for any AI-powered IoT application.
+
+## Performance metrics
+
+OneClaw delivers exceptional performance optimized for edge environments:
+
+| Metric | Target | Actual |
+|--------|--------|--------|
+| Boot time | `<10ms` | 0.79us |
+| Binary size | `<5MB` | ~3.4MB |
+| Message throughput | `>1K/sec` | 3.8M/sec |
+| Event processing | `>5K/sec` | 443K/sec |
+| Memory search | `<5ms` | 11.9us |
+| Test coverage | — | 550+ tests |
+
+## Key features
+
+<CardGroup cols={2}>
+  <Card title="Lightweight & fast" icon="rocket">
+    Boot in microseconds with a ~3.4MB binary. Process 3.8M messages/sec and 443K events/sec with minimal resource footprint.
+  </Card>
+  
+  <Card title="6-layer architecture" icon="layer-group">
+    Trait-driven design from security to channels. Swap implementations easily: Noop, Default, or Custom for every layer.
+  </Card>
+  
+  <Card title="LLM orchestration" icon="brain">
+    Smart routing across 6 LLM providers with automatic fallback chains. Graceful degradation keeps your system running even offline.
+  </Card>
+  
+  <Card title="Hybrid memory search" icon="magnifying-glass">
+    SQLite FTS5 keyword search combined with vector embeddings using cosine similarity and RRF fusion for semantic queries.
+  </Card>
+  
+  <Card title="Event-driven architecture" icon="bolt">
+    Reactive pub/sub with sync or async event bus. Build real-time pipelines with sub-10ms latency using tokio broadcast.
+  </Card>
+  
+  <Card title="Deny-by-default security" icon="shield-halved">
+    Pairing, rate limiting, per-command authorization, and API key masking. Every action requires explicit permission.
+  </Card>
+</CardGroup>
+
+## Architecture overview
+
+OneClaw's 6-layer architecture provides clear separation of concerns:
+
+```
++---------------------------------------------------------------------------+
+| L0: Security --------- deny-by-default, pairing, per-command auth        |
+| L1: Orchestrator ----- ModelRouter, ChainExecutor, ContextManager        |
+| L2: Memory ----------- SQLite FTS5 + Vector Search (cosine + RRF)        |
+| L3: Event Bus -------- Sync (default) or Async (tokio broadcast)         |
+| L4: Tool + Channel --- sandboxed tools, CLI/TCP/Telegram/MQTT            |
+| Provider System ------ 6 LLM providers, FallbackChain, ReliableProvider  |
+| Embedding System ----- Ollama/OpenAI embeddings, auto-embed memory       |
++---------------------------------------------------------------------------+
+```
+
+### Layer responsibilities
+
+| Layer | Role | Implementation |
+|-------|------|----------------|
+| L0 Security | Deny-by-default access control | Pairing, rate limiting, per-command auth, API key masking |
+| L1 Orchestrator | LLM routing + multi-step reasoning | Router, Context Manager, Chain Executor |
+| L2 Memory | Persistent storage + vector search | SQLite FTS5 + cosine similarity + RRF fusion |
+| L3 Event Bus | Reactive pub/sub + pipelines | Sync (DefaultEventBus) or Async (tokio broadcast) |
+| L4 Tool | Sandboxed external actions | Registry, param validation, system_info/file_write/notify |
+| L5 Channel | Multi-source I/O | CLI, TCP, Telegram, MQTT — ChannelManager round-robin |
+
+### LLM and embedding providers
+
+**LLM providers:** Anthropic, OpenAI, DeepSeek, Groq, Gemini, Ollama — with FallbackChain auto-failover.
+
+**Embedding providers:** Ollama (nomic-embed-text 768d), OpenAI (text-embedding-3-small 1536d).
+
+## Use cases
+
+OneClaw powers AI applications across diverse edge environments:
+
+- **Smart home automation** — Voice assistants, device control, and intelligent routines
+- **Industrial IoT monitoring** — Predictive maintenance and anomaly detection
+- **Agricultural sensor networks** — Crop monitoring and automated irrigation
+- **Healthcare devices** — Patient monitoring and vital sign tracking
+- **Any domain needing AI + Edge + Realtime** — Build your custom application
+
+## Design principles
+
+1. **Trait-driven** — Every layer is a trait. Swap Noop, Default, or Custom implementations.
+2. **Deny-by-default** — Security blocks everything unless explicitly allowed.
+3. **Graceful degradation** — LLM offline? Falls back to noop. Memory full? Handles gracefully.
+4. **Domain-agnostic** — Kernel knows nothing about your domain. Your app adds the domain logic.
+5. **Edge-viable** — Tokio async runtime, no garbage collector, ~3.5MB binary, ARM cross-compile ready.
+
+## Get started
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="play" href="/quickstart">
+    Get OneClaw running in minutes
+  </Card>
+  
+  <Card title="Installation" icon="download" href="/installation">
+    Detailed installation and deployment guide
+  </Card>
+</CardGroup>

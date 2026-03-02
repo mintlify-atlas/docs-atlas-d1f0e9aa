@@ -1,0 +1,234 @@
+---
+title: System Commands
+description: Monitor runtime health, metrics, and configuration
+---
+
+## help
+
+Display all available commands and usage information.
+
+**Usage:**
+```
+help
+```
+
+**Output:**
+```
+OneClaw Commands:
+  ask Q        - Ask AI a question
+  tools        - List registered tools
+  tool X k=v   - Execute tool X with params (key=value)
+  channels     - List active channels
+  events       - Show event bus status and recent events
+  status       - Show agent status and config
+  metrics      - Show operational metrics (counters, uptime)
+  health       - Health check all layers
+  reload       - Check config file for changes (report only)
+  providers    - List LLM providers and status
+  pair         - Generate device pairing code
+  verify CODE  - Pair device with 6-digit code
+  devices      - List all paired devices
+  unpair ID    - Remove a paired device (prefix match)
+  remember X   - Store X in memory
+  recall X     - Search memory for X
+  help         - Show this help message
+  exit         - Shut down the agent
+
+Any other input will be processed by the AI pipeline.
+```
+
+**Security:** Always open (no authorization required)
+
+## status
+
+Display system overview with runtime configuration and current state.
+
+**Usage:**
+```
+status
+```
+
+**Example Output:**
+```
+OneClaw Agent v1.5.0
+
+  Uptime: 2h 15m 30s
+
+  Security: enforced
+    Memory: 42 entries (sqlite)
+    Embedding: nomic-embed-text (768d) — 38 embedded / 42 total
+    Provider: anthropic (online)
+    Chain: anthropic → ollama (fallback)
+    Tools: 3
+    Events: 1250 processed, 0 pending
+    Messages: 87 total (2 denied)
+    LLM: 15 calls (avg 245ms)
+
+  Type 'health' for detailed check
+    Type 'metrics' for full telemetry
+```
+
+**Security:** Requires `system:status` authorization
+
+**Fields:**
+- **Uptime:** Time since runtime started
+- **Security:** `enforced` (deny-by-default) or `open`
+- **Memory:** Entry count and backend type (sqlite/noop)
+- **Embedding:** Provider, dimensions, embedded ratio
+- **Provider:** Active LLM provider and status (online/offline)
+- **Chain:** Fallback chain configuration
+- **Tools:** Number of registered tools
+- **Events:** Event bus activity
+- **Messages:** Total processed, denied count
+- **LLM:** Call count and average latency
+
+## health
+
+Perform detailed health check across all 5 runtime layers.
+
+**Usage:**
+```
+health
+```
+
+**Example Output:**
+```
+OneClaw Health Check:
+  L0 Security:     OK
+  L1 Orchestrator: OK (provider: anthropic (online))
+  L2 Memory:       OK (42 entries)
+  L3 Event Bus:    OK (0 pending)
+  L4 Tools:        OK (3 registered)
+
+  Uptime: 2h 15m 30s | Status: HEALTHY
+```
+
+**Security:** Requires `system:health` authorization
+
+**Status Values:**
+- **HEALTHY:** All layers operational, LLM provider online
+- **DEGRADED:** Core layers OK, but LLM provider offline
+- **UNHEALTHY:** One or more critical layers failed
+
+**Layer Checks:**
+- **L0 Security:** Authorization subsystem probe
+- **L1 Orchestrator:** LLM provider availability
+- **L2 Memory:** Storage backend query
+- **L3 Event Bus:** Pending event count
+- **L4 Tools:** Registry population
+
+## metrics
+
+Display full operational telemetry with performance counters.
+
+**Usage:**
+```
+metrics
+```
+
+**Example Output:**
+```
+OneClaw Metrics:
+  Uptime: 2h 15m 30s
+
+  Messages:
+    Total: 87
+    Secured: 85
+    Denied: 2
+    Rate Limited: 0
+
+  LLM:
+    Calls: 15
+    Failed: 1
+    Tokens: 12,450
+    Latency (total): 3,675ms
+    Latency (avg): 245ms
+
+  Memory:
+    Stores: 42
+    Searches: 28
+
+  Tools:
+    Calls: 8
+    Failed: 0
+
+  Events:
+    Processed: 1,250
+
+  Errors: 1
+```
+
+**Security:** Requires `system:metrics` authorization
+
+**Metric Categories:**
+- **Messages:** Total processed, security outcomes, rate limiting
+- **LLM:** API calls, failures, token usage, latency
+- **Memory:** Store/search operations
+- **Tools:** Execution count and failures
+- **Events:** Event bus processing
+- **Errors:** Total error count
+
+## reload
+
+Check configuration file for changes and report differences.
+
+**Usage:**
+```
+reload
+```
+
+**Example Output:**
+```
+Config reload from: config/oneclaw.toml
+  providers.default: ollama -> anthropic
+  providers.anthropic.model: claude-sonnet-4 -> claude-opus-4
+  (Report only — restart to apply changes)
+```
+
+**Security:** Requires `system:reload` authorization
+
+**Behavior:**
+- Searches for `oneclaw.toml` or `config/oneclaw.toml`
+- Parses new config and compares to current runtime config
+- Reports differences across key fields:
+  - `providers.default`
+  - `security.deny_by_default`
+  - `memory.backend`
+  - `runtime.name`
+  - `providers.*.model`
+  - `channels.active`
+- **Does NOT hot-apply changes** — requires restart
+
+**No Changes:**
+```
+Config reload from: config/oneclaw.toml
+  No changes detected.
+```
+
+## exit / quit
+
+Gracefully shut down the OneClaw runtime.
+
+**Usage:**
+```
+exit
+quit
+q
+```
+
+**Output:**
+```
+Goodbye!
+Graceful shutdown initiated
+Event loop stopped.
+```
+
+**Security:** Always open (no authorization required)
+
+**Behavior:**
+- Sends "Goodbye!" response to channel
+- Drains event bus queue
+- Stops event loop
+- Clean shutdown (no force-kill)
+
+**Variants:** All case-insensitive (`EXIT`, `Quit`, etc.)

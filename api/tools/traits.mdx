@@ -1,0 +1,209 @@
+---
+title: Tool Trait
+description: Core trait for implementing executable tools in OneClaw
+---
+
+## Overview
+
+The `Tool` trait is the foundation of Layer 4 (Tools) in OneClaw. It defines the interface for executable actions that agents can perform in the world. All tools must implement this trait to be registered and executed through the `ToolRegistry`.
+
+**Source**: `/home/daytona/workspace/source/crates/oneclaw-core/src/tool/traits.rs:59`
+
+## Trait Definition
+
+```rust
+pub trait Tool: Send + Sync {
+    /// Tool info for discovery/LLM function calling
+    fn info(&self) -> ToolInfo;
+
+    /// Execute the tool with given parameters
+    /// Security check happens BEFORE this is called (by ToolRegistry)
+    fn execute(&self, params: &HashMap<String, String>) -> Result<ToolResult>;
+}
+```
+
+## Core Types
+
+### ToolInfo
+
+Describes the tool's metadata for discovery and LLM function calling.
+
+```rust
+pub struct ToolInfo {
+    pub name: String,
+    pub description: String,
+    pub params: Vec<ToolParam>,
+    pub category: String,  // "io", "network", "system", "notify"
+}
+```
+
+### ToolParam
+
+Defines a single parameter that the tool accepts.
+
+```rust
+pub struct ToolParam {
+    pub name: String,
+    pub description: String,
+    pub required: bool,
+}
+```
+
+### ToolResult
+
+Represents the outcome of tool execution.
+
+```rust
+pub struct ToolResult {
+    pub success: bool,
+    pub output: String,
+    pub metadata: HashMap<String, String>,
+}
+```
+
+#### Builder Methods
+
+```rust
+// Create successful result
+ToolResult::ok(output: impl Into<String>) -> Self
+
+// Create error result
+ToolResult::err(message: impl Into<String>) -> Self
+
+// Attach metadata
+fn with_meta(self, key: impl Into<String>, val: impl Into<String>) -> Self
+```
+
+## Methods
+
+### info()
+
+Returns the tool's metadata for registration and discovery.
+
+**Returns**: `ToolInfo` containing the tool's name, description, parameters, and category.
+
+**Usage**:
+```rust
+impl Tool for MyTool {
+    fn info(&self) -> ToolInfo {
+        ToolInfo {
+            name: "my_tool".into(),
+            description: "Does something useful".into(),
+            params: vec![
+                ToolParam {
+                    name: "input".into(),
+                    description: "The input value".into(),
+                    required: true,
+                },
+            ],
+            category: "system".into(),
+        }
+    }
+}
+```
+
+### execute()
+
+Executes the tool with the provided parameters.
+
+**Parameters**:
+- `params`: `&HashMap<String, String>` - Key-value pairs of parameter names and values
+
+**Returns**: `Result<ToolResult>` - Success with output or error
+
+**Security**: Parameter validation and security checks are performed by `ToolRegistry` BEFORE calling `execute()`.
+
+**Usage**:
+```rust
+impl Tool for MyTool {
+    fn execute(&self, params: &HashMap<String, String>) -> Result<ToolResult> {
+        let input = params.get("input")
+            .ok_or_else(|| OneClawError::Tool("Missing input".into()))?;
+        
+        // Perform the tool's action
+        let output = process(input)?;
+        
+        Ok(ToolResult::ok(output)
+            .with_meta("execution_time", "15ms"))
+    }
+}
+```
+
+## Parameter Validation
+
+The `ToolRegistry` automatically validates required parameters before calling `execute()`. However, tools should still validate parameter values and types:
+
+```rust
+fn execute(&self, params: &HashMap<String, String>) -> Result<ToolResult> {
+    let mode = params.get("mode")
+        .map(|s| s.as_str())
+        .unwrap_or("default");
+    
+    if !matches!(mode, "read" | "write" | "append") {
+        return Ok(ToolResult::err(
+            format!("Invalid mode: {}", mode)
+        ));
+    }
+    
+    // Continue execution...
+}
+```
+
+## Categories
+
+Tools are organized into categories:
+
+- **`io`**: File and data operations (e.g., `file_write`)
+- **`network`**: Network requests and external communication
+- **`system`**: System information and control (e.g., `system_info`)
+- **`notify`**: Notifications and alerts (e.g., `notify`)
+
+## Example: NoopTool
+
+A minimal tool implementation for testing:
+
+```rust
+pub struct NoopTool;
+
+impl Tool for NoopTool {
+    fn info(&self) -> ToolInfo {
+        ToolInfo {
+            name: "noop".into(),
+            description: "Does nothing (test tool)".into(),
+            params: vec![],
+            category: "system".into(),
+        }
+    }
+
+    fn execute(&self, params: &HashMap<String, String>) -> Result<ToolResult> {
+        Ok(ToolResult::ok(
+            format!("noop executed with {} params", params.len())
+        ))
+    }
+}
+```
+
+## Thread Safety
+
+Tools must be `Send + Sync` to allow concurrent execution across threads. Ensure any internal state is properly synchronized:
+
+```rust
+use std::sync::Mutex;
+
+pub struct StatefulTool {
+    counter: Mutex<u64>,
+}
+
+impl Tool for StatefulTool {
+    fn execute(&self, _params: &HashMap<String, String>) -> Result<ToolResult> {
+        let mut count = self.counter.lock().unwrap();
+        *count += 1;
+        Ok(ToolResult::ok(format!("Execution #{}", count)))
+    }
+}
+```
+
+## See Also
+
+- [ToolRegistry](/api/tools/registry) - Tool registration and execution
+- [Built-in Tools](/api/tools/built-in) - Standard tool implementations

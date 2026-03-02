@@ -1,0 +1,414 @@
+---
+title: LLM Providers
+description: Implementation details for all 6 LLM providers in OneClaw's multi-provider system
+---
+
+## Overview
+
+OneClaw supports 6 LLM providers across 4 different API formats:
+
+| Provider | Format | Default Endpoint | Auth Header |
+|----------|--------|------------------|-------------|
+| Anthropic | Anthropic Messages | `https://api.anthropic.com` | `x-api-key` |
+| OpenAI | OpenAI Chat Completions | `https://api.openai.com` | `Bearer` |
+| DeepSeek | OpenAI Chat Completions | `https://api.deepseek.com` | `Bearer` |
+| Groq | OpenAI Chat Completions | `https://api.groq.com/openai` | `Bearer` |
+| Gemini | Gemini GenerateContent | `https://generativelanguage.googleapis.com` | Query param `?key=` |
+| Ollama | Ollama Chat | `http://localhost:11434` | None (local) |
+
+---
+
+## AnthropicProvider
+
+**API Format:** POST `/v1/messages` with `x-api-key` header
+
+### Supported Models
+
+- `claude-sonnet-4-20250514` (default) - Best balance of quality/speed/cost
+- `claude-haiku-4-5-20251001` - Fast, cheap, good for classification
+- `claude-opus-4-5-20250918` - Maximum quality, expensive
+
+### Configuration
+
+```rust
+use oneclaw_core::provider::{AnthropicProvider, ProviderConfig};
+
+let config = ProviderConfig {
+    provider_id: "anthropic".into(),
+    endpoint: None, // Uses default
+    api_key: Some("sk-ant-...".into()),
+    model: "claude-sonnet-4-20250514".into(),
+    max_tokens: 1024,
+    temperature: 0.3,
+};
+
+let provider = AnthropicProvider::new(config)?;
+```
+
+### API Key Resolution
+
+Priority order:
+1. `config.api_key` (explicit in code/TOML)
+2. `ONECLAW_API_KEY` environment variable
+3. `ANTHROPIC_API_KEY` environment variable
+4. Error if none found
+
+### API Format Differences
+
+**System Prompt:** Separate top-level `system` parameter (not in messages array)
+
+**Request:**
+```json
+{
+  "model": "claude-sonnet-4-20250514",
+  "max_tokens": 1024,
+  "system": "You are helpful",
+  "messages": [
+    {"role": "user", "content": "Hello"}
+  ]
+}
+```
+
+**Response:**
+```json
+{
+  "content": [{"type": "text", "text": "Hi there!"}],
+  "usage": {"input_tokens": 10, "output_tokens": 5}
+}
+```
+
+---
+
+## OpenAICompatibleProvider
+
+**API Format:** POST `/v1/chat/completions` with `Bearer` token
+
+This single implementation serves 3 providers:
+
+### OpenAI (GPT-4o family)
+
+**Default Model:** `gpt-4o`
+
+**Other Models:**
+- `gpt-4o-mini` - Smaller, faster, cheaper
+- `o1` - Reasoning model
+
+**Configuration:**
+```rust
+use oneclaw_core::provider::{OpenAICompatibleProvider, PRESET_OPENAI};
+
+let provider = OpenAICompatibleProvider::openai(ProviderConfig {
+    provider_id: "openai".into(),
+    api_key: Some("sk-...".into()),
+    model: "gpt-4o".into(),
+    max_tokens: 1024,
+    temperature: 0.3,
+    endpoint: None,
+})?;
+```
+
+**API Key Resolution:** `config.api_key` → `ONECLAW_API_KEY` → `OPENAI_API_KEY`
+
+### DeepSeek
+
+**Default Model:** `deepseek-chat`
+
+**Other Models:**
+- `deepseek-reasoner` - Extended thinking/reasoning model
+
+**Configuration:**
+```rust
+let provider = OpenAICompatibleProvider::deepseek(ProviderConfig {
+    provider_id: "deepseek".into(),
+    api_key: Some("sk-...".into()),
+    model: "deepseek-chat".into(),
+    max_tokens: 1024,
+    temperature: 0.3,
+    endpoint: None,
+})?;
+```
+
+**API Key Resolution:** `config.api_key` → `ONECLAW_API_KEY` → `DEEPSEEK_API_KEY`
+
+### Groq (Fast Inference)
+
+**Default Model:** `llama-3.3-70b-versatile`
+
+**Other Models:**
+- `mixtral-8x7b-32768` - Mixtral model
+- Various Llama variants
+
+**Configuration:**
+```rust
+let provider = OpenAICompatibleProvider::groq(ProviderConfig {
+    provider_id: "groq".into(),
+    api_key: Some("gsk-...".into()),
+    model: "llama-3.3-70b-versatile".into(),
+    max_tokens: 1024,
+    temperature: 0.3,
+    endpoint: None,
+})?;
+```
+
+**API Key Resolution:** `config.api_key` → `ONECLAW_API_KEY` → `GROQ_API_KEY`
+
+### API Format (All OpenAI-Compatible)
+
+**System Prompt:** Included as a message with `role: "system"` in the messages array
+
+**Request:**
+```json
+{
+  "model": "gpt-4o",
+  "messages": [
+    {"role": "system", "content": "You are helpful"},
+    {"role": "user", "content": "Hello"}
+  ],
+  "max_tokens": 1024,
+  "temperature": 0.3
+}
+```
+
+**Response:**
+```json
+{
+  "choices": [{
+    "message": {"role": "assistant", "content": "Hi there!"},
+    "finish_reason": "stop"
+  }],
+  "usage": {
+    "prompt_tokens": 10,
+    "completion_tokens": 5,
+    "total_tokens": 15
+  }
+}
+```
+
+---
+
+## GeminiProvider
+
+**API Format:** POST `/v1beta/models/{model}:generateContent?key={api_key}`
+
+### Supported Models
+
+- `gemini-2.0-flash` (default) - Fast, cheap, good quality
+- `gemini-2.0-flash-lite` - Fastest, cheapest
+- `gemini-2.5-pro` - Best quality, expensive
+- `gemini-2.5-flash` - Balanced with extended thinking
+
+### Configuration
+
+```rust
+use oneclaw_core::provider::{GeminiProvider, ProviderConfig};
+
+let provider = GeminiProvider::new(ProviderConfig {
+    provider_id: "google".into(),
+    api_key: Some("AIza...".into()),
+    model: "gemini-2.0-flash".into(),
+    max_tokens: 1024,
+    temperature: 0.3,
+    endpoint: None,
+})?;
+```
+
+### API Key Resolution
+
+Priority order:
+1. `config.api_key`
+2. `ONECLAW_API_KEY`
+3. `GOOGLE_API_KEY`
+4. `GEMINI_API_KEY`
+
+### API Format Differences
+
+**Key Differences from Other Providers:**
+- Model name in URL path, not request body
+- API key in query parameter `?key=`, not header
+- System prompt as separate `systemInstruction` field
+- Role `"model"` instead of `"assistant"`
+- Content uses `parts` array, not flat `content` string
+- camelCase JSON fields (not snake_case)
+
+**Request:**
+```json
+{
+  "systemInstruction": {
+    "parts": [{"text": "You are helpful"}]
+  },
+  "contents": [
+    {
+      "role": "user",
+      "parts": [{"text": "Hello"}]
+    }
+  ],
+  "generationConfig": {
+    "maxOutputTokens": 1024,
+    "temperature": 0.3
+  }
+}
+```
+
+**Response:**
+```json
+{
+  "candidates": [{
+    "content": {
+      "role": "model",
+      "parts": [{"text": "Hi there!"}]
+    },
+    "finishReason": "STOP"
+  }],
+  "usageMetadata": {
+    "promptTokenCount": 10,
+    "candidatesTokenCount": 5,
+    "totalTokenCount": 15
+  }
+}
+```
+
+---
+
+## OllamaProvider
+
+**API Format:** POST `/api/chat` (no authentication)
+
+### Supported Models
+
+**Edge devices (RPi 4, 4GB RAM):**
+- `llama3.2:3b` (default) - Good balance
+- `phi3:mini` - Smaller, faster
+- `qwen2.5:3b` - Multilingual, Vietnamese OK
+
+**Desktop/Server:**
+- `llama3.2:7b` - Higher quality
+- `mistral:7b` - Alternative
+- `deepseek-r1:7b` - Reasoning model
+
+### Configuration
+
+```rust
+use oneclaw_core::provider::OllamaProvider;
+
+// With defaults (localhost:11434, llama3.2:3b)
+let provider = OllamaProvider::default_local()?;
+
+// Custom endpoint and model
+let provider = OllamaProvider::new(
+    Some("http://192.168.1.100:11434"),
+    Some("phi3:mini")
+)?;
+
+// From ProviderConfig
+let provider = OllamaProvider::from_config(&ProviderConfig {
+    provider_id: "ollama".into(),
+    endpoint: Some("http://localhost:11434".into()),
+    api_key: None, // Not needed
+    model: "llama3.2:3b".into(),
+    max_tokens: 1024,
+    temperature: 0.3,
+})?;
+```
+
+### Key Differences
+
+**No Authentication:** No API key required (local service)
+
+**Health Check:** `is_available()` performs actual health check via `GET /api/tags` with 5s timeout
+
+**Longer Timeout:** 120s default (vs 60s for cloud providers) for slow edge hardware
+
+**Different Endpoint:** `/api/chat` (not `/v1/chat/completions`)
+
+**Parameter Names:** Uses `num_predict` (not `max_tokens`)
+
+### API Format
+
+**Request:**
+```json
+{
+  "model": "llama3.2:3b",
+  "messages": [
+    {"role": "system", "content": "You are helpful"},
+    {"role": "user", "content": "Hello"}
+  ],
+  "options": {
+    "num_predict": 1024,
+    "temperature": 0.3
+  },
+  "stream": false
+}
+```
+
+**Response:**
+```json
+{
+  "message": {"role": "assistant", "content": "Hi there!"},
+  "done": true,
+  "prompt_eval_count": 10,
+  "eval_count": 5,
+  "total_duration": 500000000
+}
+```
+
+### Model Management
+
+**Check Available Models:**
+```rust
+let models = provider.list_models()?;
+for model in models {
+    println!("Available: {}", model);
+}
+```
+
+**Health Check:**
+```rust
+if provider.check_health() {
+    println!("Ollama is running and model is available");
+} else {
+    println!("Ollama not reachable or model not found");
+}
+```
+
+---
+
+## Choosing a Provider
+
+### For Production (Cloud)
+
+**Primary:** Anthropic Claude (`claude-sonnet-4-20250514`)
+- Best overall quality
+- Good context handling
+- Reliable API
+
+**Secondary:** OpenAI GPT (`gpt-4o`)
+- Fast inference
+- Wide model selection
+- Excellent for reasoning
+
+**Budget Alternative:** DeepSeek (`deepseek-chat`)
+- Very cost-effective
+- Good quality
+- Fast reasoning model available
+
+### For Edge/IoT
+
+**Ollama** (`llama3.2:3b` on RPi, `llama3.2:7b` on desktop)
+- Fully offline
+- No API costs
+- Privacy-preserving
+- Runs on edge hardware
+
+### For Speed
+
+**Groq** (`llama-3.3-70b-versatile`)
+- Fastest inference
+- Good quality
+- OpenAI-compatible
+
+### For Multimodal
+
+**Gemini** (`gemini-2.0-flash`)
+- Native multimodal support
+- Fast and cheap
+- Good multilingual support

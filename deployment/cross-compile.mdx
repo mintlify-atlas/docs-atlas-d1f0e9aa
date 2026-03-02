@@ -1,0 +1,315 @@
+---
+title: Cross-Compilation for ARM
+description: Build ARM binaries for edge devices from your development machine
+---
+
+Cross-compilation allows you to build ARM binaries on your x86_64 development machine, avoiding slow compilation directly on Raspberry Pi or other edge devices.
+
+## Prerequisites
+
+### Option A: Using `cross` (Recommended)
+
+The `cross` tool uses Docker containers with pre-configured ARM toolchains:
+
+```bash
+cargo install cross --git https://github.com/cross-rs/cross
+```
+
+**Requirements**:
+- Docker installed and running
+- ~1 GB disk space for Docker images
+
+**Benefits**:
+- Zero configuration required
+- Consistent builds across machines
+- Handles all dependencies automatically
+
+### Option B: Manual Cross-Compiler
+
+Install ARM cross-compilers directly on your system:
+
+**Ubuntu/Debian**:
+```bash
+sudo apt-get install gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf
+```
+
+**macOS**:
+```bash
+brew install arm-linux-gnueabihf-binutils aarch64-linux-gnu-binutils
+```
+
+**Benefits**:
+- No Docker required
+- Faster builds (no container overhead)
+
+**Drawbacks**:
+- More complex setup
+- Platform-dependent configuration
+
+## Build Script
+
+OneClaw includes `scripts/cross-build.sh` for automated cross-compilation.
+
+### Usage
+
+```bash
+./scripts/cross-build.sh [VERSION]
+```
+
+**Example**:
+```bash
+./scripts/cross-build.sh 1.6.0
+```
+
+### What It Does
+
+<Steps>
+  <Step title="Detects build tool">
+    Automatically uses `cross` if available, falls back to `cargo`:
+    ```
+    Using: cross (Docker-based)
+    ```
+  </Step>
+
+  <Step title="Builds for ARM targets">
+    Compiles for multiple architectures:
+    - `aarch64-unknown-linux-gnu` — Raspberry Pi 4/5 64-bit, Orange Pi, NanoPi
+    - `armv7-unknown-linux-gnueabihf` — Raspberry Pi 3/Zero 32-bit, older ARM boards
+  </Step>
+
+  <Step title="Builds for host">
+    Also builds a native binary for your development machine (x86_64).
+  </Step>
+
+  <Step title="Copies to release/ directory">
+    Outputs versioned binaries:
+    ```
+    release/oneclaw-elderly-1.6.0-aarch64-unknown-linux-gnu
+    release/oneclaw-elderly-1.6.0-armv7-unknown-linux-gnueabihf
+    release/oneclaw-elderly-1.6.0-host
+    ```
+  </Step>
+</Steps>
+
+### Build Output
+
+```bash
+=======================================================
+  OneClaw Cross-Build v1.6.0
+=======================================================
+
+  Using: cross (Docker-based)
+
+>> Building for aarch64-unknown-linux-gnu...
+  PASS aarch64-unknown-linux-gnu: 3421 KB
+
+>> Building for armv7-unknown-linux-gnueabihf...
+  PASS armv7-unknown-linux-gnueabihf: 3512 KB
+
+>> Building for host...
+  PASS host: 3398 KB
+
+=======================================================
+  Cross-build complete: 3 built, 0 skipped
+=======================================================
+
+  Binaries:
+  -rwxr-xr-x 1 user user 3.3M oneclaw-elderly-1.6.0-aarch64-unknown-linux-gnu
+  -rwxr-xr-x 1 user user 3.4M oneclaw-elderly-1.6.0-armv7-unknown-linux-gnueabihf
+  -rwxr-xr-x 1 user user 3.3M oneclaw-elderly-1.6.0-host
+
+  Deploy to Pi:
+    scp release/oneclaw-elderly-1.6.0-aarch64-unknown-linux-gnu pi@raspberrypi:~/
+    scp deploy/oneclaw.service deploy/install.sh pi@raspberrypi:~/
+```
+
+## Manual Cross-Compilation
+
+If you prefer manual control:
+
+### Using `cross`
+
+```bash
+# Add Rust target (cross does this automatically, but doesn't hurt)
+rustup target add aarch64-unknown-linux-gnu
+
+# Build for ARM64
+cross build --release -p oneclaw-core --target aarch64-unknown-linux-gnu
+
+# Build for ARMv7
+cross build --release -p oneclaw-core --target armv7-unknown-linux-gnueabihf
+```
+
+### Using `cargo` (manual toolchain)
+
+```bash
+# Add Rust target
+rustup target add aarch64-unknown-linux-gnu
+
+# Configure linker in .cargo/config.toml
+mkdir -p .cargo
+cat > .cargo/config.toml << 'EOF'
+[target.aarch64-unknown-linux-gnu]
+linker = "aarch64-linux-gnu-gcc"
+
+[target.armv7-unknown-linux-gnueabihf]
+linker = "arm-linux-gnueabihf-gcc"
+EOF
+
+# Build
+cargo build --release --target aarch64-unknown-linux-gnu
+```
+
+## Target Setup
+
+### Available Targets
+
+| Target | Architecture | Use Case |
+|--------|--------------|----------|
+| `aarch64-unknown-linux-gnu` | ARM64 | Raspberry Pi 4/5 (64-bit), modern ARM boards |
+| `armv7-unknown-linux-gnueabihf` | ARMv7 | Raspberry Pi 3/Zero (32-bit), legacy ARM |
+| `x86_64-unknown-linux-gnu` | x86-64 | Intel NUC, edge gateways, development |
+
+### Adding Targets
+
+If using `cargo` directly, add the target to Rust:
+
+```bash
+rustup target add aarch64-unknown-linux-gnu
+```
+
+With `cross`, targets are handled automatically.
+
+## Binary Location
+
+After building, binaries are in:
+
+### Using `cross-build.sh`
+
+```
+release/
+├── oneclaw-elderly-1.6.0-aarch64-unknown-linux-gnu
+├── oneclaw-elderly-1.6.0-armv7-unknown-linux-gnueabihf
+└── oneclaw-elderly-1.6.0-host
+```
+
+### Manual Build
+
+```
+target/
+├── aarch64-unknown-linux-gnu/
+│   └── release/
+│       └── oneclaw-core  # or oneclaw-elderly
+└── armv7-unknown-linux-gnueabihf/
+    └── release/
+        └── oneclaw-core
+```
+
+## Deployment
+
+After cross-compiling, copy binaries to your edge device:
+
+```bash
+# Copy ARM64 binary to Raspberry Pi
+scp release/oneclaw-elderly-1.6.0-aarch64-unknown-linux-gnu pi@raspberrypi:~/
+
+# Copy deployment scripts
+scp deploy/oneclaw.service deploy/install.sh pi@raspberrypi:~/
+
+# SSH and install
+ssh pi@raspberrypi
+sudo ./install.sh 1.6.0
+```
+
+See [Raspberry Pi Deployment](/deployment/raspberry-pi) for full installation steps.
+
+## Dependency Configuration
+
+OneClaw is configured for seamless cross-compilation:
+
+### SQLite (Bundled)
+
+```toml
+[dependencies]
+rusqlite = { version = "0.32", features = ["bundled"] }
+```
+
+The `bundled` feature compiles SQLite from C source, eliminating the need for system SQLite libraries on the target.
+
+### TLS (Pure Rust)
+
+```toml
+[dependencies]
+reqwest = { version = "0.12", features = ["rustls-tls"], default-features = false }
+```
+
+Using `rustls-tls` instead of `native-tls` avoids OpenSSL dependencies, which are difficult to cross-compile.
+
+### No System Dependencies
+
+OneClaw has **zero runtime dependencies**:
+- No libc dynamic linking required
+- No OpenSSL required
+- No system SQLite required
+
+This makes cross-compilation trivial.
+
+## Troubleshooting
+
+### `cross` Build Fails
+
+**Symptom**: Docker errors or missing images
+
+**Solution**:
+```bash
+# Ensure Docker is running
+sudo systemctl start docker
+
+# Pull cross images manually
+docker pull ghcr.io/cross-rs/aarch64-unknown-linux-gnu:latest
+```
+
+### Linker Errors (Manual `cargo`)
+
+**Symptom**: `ld: cannot find -lgcc`
+
+**Solution**: Install cross-compiler toolchain:
+```bash
+sudo apt-get install gcc-aarch64-linux-gnu
+```
+
+### Wrong Architecture
+
+**Symptom**: Binary fails on Pi with "cannot execute binary file: Exec format error"
+
+**Solution**: Verify target matches Pi architecture:
+```bash
+# On Pi, check architecture
+uname -m
+
+# aarch64 -> use aarch64-unknown-linux-gnu
+# armv7l  -> use armv7-unknown-linux-gnueabihf
+```
+
+### Build Takes Forever
+
+**Symptom**: Cross-compilation is very slow
+
+**Solutions**:
+- Use `cross` with Docker (caches dependencies)
+- Enable `sccache` for incremental builds:
+  ```bash
+  cargo install sccache
+  export RUSTC_WRAPPER=sccache
+  ```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Deploy to Raspberry Pi" icon="raspberry-pi" href="/deployment/raspberry-pi">
+    Install cross-compiled binaries on edge devices
+  </Card>
+  <Card title="systemd Service" icon="server" href="/deployment/systemd">
+    Set up OneClaw as a system service
+  </Card>
+</CardGroup>

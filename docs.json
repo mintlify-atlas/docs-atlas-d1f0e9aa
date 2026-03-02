@@ -1,122 +1,162 @@
 {
   "$schema": "https://mintlify.com/docs.json",
-  "theme": "mint",
-  "name": "Mint Starter Kit",
+  "name": "OneClaw",
+  "theme": "aspen",
   "colors": {
-    "primary": "#16A34A",
-    "light": "#07C983",
-    "dark": "#15803D"
+    "primary": "#E67E22",
+    "light": "#F39C12",
+    "dark": "#D35400"
   },
-  "favicon": "/favicon.svg",
+  "navbar": {
+    "primary": {
+      "type": "github",
+      "href": "https://github.com/nclamvn/oneclaw"
+    }
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/nclamvn/oneclaw"
+    }
+  },
   "navigation": {
     "tabs": [
       {
-        "tab": "Guides",
+        "tab": "Documentation",
         "groups": [
           {
-            "group": "Getting started",
+            "group": "Get Started",
             "pages": [
-              "index",
+              "introduction",
               "quickstart",
-              "development"
+              "installation"
             ]
           },
           {
-            "group": "Customization",
+            "group": "Core Concepts",
             "pages": [
-              "essentials/settings",
-              "essentials/navigation"
+              "concepts/architecture",
+              "concepts/layers",
+              "concepts/traits",
+              "concepts/security"
             ]
           },
           {
-            "group": "Writing content",
+            "group": "Configuration",
             "pages": [
-              "essentials/markdown",
-              "essentials/code",
-              "essentials/images",
-              "essentials/reusable-snippets"
+              "configuration/overview",
+              "configuration/providers",
+              "configuration/embedding",
+              "configuration/security"
             ]
           },
           {
-            "group": "AI tools",
+            "group": "Deployment",
             "pages": [
-              "ai-tools/cursor",
-              "ai-tools/claude-code",
-              "ai-tools/windsurf"
+              "deployment/edge-devices",
+              "deployment/raspberry-pi",
+              "deployment/cross-compile",
+              "deployment/systemd"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/llm-providers",
+              "guides/memory-search",
+              "guides/event-bus",
+              "guides/custom-tools",
+              "guides/custom-channels"
             ]
           }
         ]
       },
       {
-        "tab": "API reference",
+        "tab": "API Reference",
         "groups": [
           {
-            "group": "API documentation",
+            "group": "Core Runtime",
             "pages": [
-              "api-reference/introduction"
+              "api/runtime",
+              "api/config",
+              "api/metrics"
             ]
           },
           {
-            "group": "Endpoint examples",
+            "group": "Layer 0: Security",
             "pages": [
-              "api-reference/endpoint/get",
-              "api-reference/endpoint/create",
-              "api-reference/endpoint/delete",
-              "api-reference/endpoint/webhook"
+              "api/security/traits",
+              "api/security/authorization",
+              "api/security/pairing"
+            ]
+          },
+          {
+            "group": "Layer 1: Orchestrator",
+            "pages": [
+              "api/orchestrator/router",
+              "api/orchestrator/context",
+              "api/orchestrator/chain"
+            ]
+          },
+          {
+            "group": "Layer 2: Memory",
+            "pages": [
+              "api/memory/traits",
+              "api/memory/sqlite",
+              "api/memory/vector"
+            ]
+          },
+          {
+            "group": "Layer 3: Event Bus",
+            "pages": [
+              "api/event-bus/traits",
+              "api/event-bus/sync",
+              "api/event-bus/async",
+              "api/event-bus/pipeline"
+            ]
+          },
+          {
+            "group": "Layer 4: Tools",
+            "pages": [
+              "api/tools/traits",
+              "api/tools/registry",
+              "api/tools/built-in"
+            ]
+          },
+          {
+            "group": "Layer 5: Channels",
+            "pages": [
+              "api/channels/traits",
+              "api/channels/manager",
+              "api/channels/implementations"
+            ]
+          },
+          {
+            "group": "Providers",
+            "pages": [
+              "api/providers/traits",
+              "api/providers/llm",
+              "api/providers/embedding",
+              "api/providers/fallback"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "CLI Reference",
+        "groups": [
+          {
+            "group": "Commands",
+            "pages": [
+              "cli/overview",
+              "cli/system",
+              "cli/memory",
+              "cli/llm",
+              "cli/tools",
+              "cli/channels"
             ]
           }
         ]
       }
-    ],
-    "global": {
-      "anchors": [
-        {
-          "anchor": "Documentation",
-          "href": "https://mintlify.com/docs",
-          "icon": "book-open-cover"
-        },
-        {
-          "anchor": "Blog",
-          "href": "https://mintlify.com/blog",
-          "icon": "newspaper"
-        }
-      ]
-    }
-  },
-  "logo": {
-    "light": "/logo/light.svg",
-    "dark": "/logo/dark.svg"
-  },
-  "navbar": {
-    "links": [
-      {
-        "label": "Support",
-        "href": "mailto:hi@mintlify.com"
-      }
-    ],
-    "primary": {
-      "type": "button",
-      "label": "Dashboard",
-      "href": "https://dashboard.mintlify.com"
-    }
-  },
-  "contextual": {
-    "options": [
-     "copy",
-     "view",
-     "chatgpt",
-     "claude",
-     "perplexity",
-     "mcp",
-     "cursor",
-     "vscode"
-   ]
-  },
-  "footer": {
-    "socials": {
-      "x": "https://x.com/mintlify",
-      "github": "https://github.com/mintlify",
-      "linkedin": "https://linkedin.com/company/mintlify"
-    }
+    ]
   }
 }

@@ -1,0 +1,400 @@
+---
+title: Vector Search API
+description: Vector embeddings, semantic search, and hybrid search with Reciprocal Rank Fusion
+---
+
+## Overview
+
+The Vector Search API (TIP-040) extends the Memory layer with semantic search capabilities using dense embeddings. It provides:
+
+- **Embedding Storage**: Store f32 vectors alongside memory entries
+- **Cosine Similarity**: Measure semantic similarity between vectors
+- **Vector Search**: Pure semantic search via brute-force cosine scan
+- **Hybrid Search**: Merge FTS5 keyword + vector results using Reciprocal Rank Fusion (RRF)
+
+**Source:** `vector.rs`
+
+## VectorMemory Trait
+
+```rust
+pub trait VectorMemory: Memory {
+    fn store_with_embedding(&self, content: &str, meta: MemoryMeta, embedding: &Embedding) -> Result<String>;
+    fn vector_search(&self, query: &VectorQuery) -> Result<Vec<VectorSearchResult>>;
+    fn hybrid_search(&self, text: &str, query_embedding: &Embedding, limit: usize) -> Result<Vec<VectorSearchResult>>;
+    fn has_vector_support(&self) -> bool;
+    fn vector_stats(&self) -> Result<VectorStats>;
+}
+```
+
+**Source:** `vector.rs:115`
+
+### Methods
+
+#### `store_with_embedding()`
+
+```rust
+fn store_with_embedding(&self, content: &str, meta: MemoryMeta, embedding: &Embedding) -> Result<String>
+```
+
+Stores content with an associated embedding vector.
+
+**Parameters:**
+- `content`: Text content to store
+- `meta`: Metadata (tags, priority, source)
+- `embedding`: Dense vector representation
+
+**Returns:** Entry ID (UUID)
+
+**Example:**
+
+```rust
+use oneclaw_core::memory::{SqliteMemory, VectorMemory, MemoryMeta};
+use oneclaw_core::memory::vector::Embedding;
+
+let mem = SqliteMemory::in_memory()?;
+let embedding = Embedding::new(vec![0.1, 0.2, 0.3], "nomic-embed-text");
+
+let id = mem.store_with_embedding(
+    "Patient reports dizziness and headache",
+    MemoryMeta::default(),
+    &embedding
+)?;
+```
+
+**Source:** `vector.rs:117`, `sqlite.rs:267`
+
+#### `vector_search()`
+
+```rust
+fn vector_search(&self, query: &VectorQuery) -> Result<Vec<VectorSearchResult>>
+```
+
+Performs pure semantic search using cosine similarity. Returns results sorted by similarity (descending).
+
+**Parameters:**
+- `query`: Vector query with embedding, limit, and min_similarity threshold
+
+**Returns:** Vector of results with similarity scores
+
+**Example:**
+
+```rust
+use oneclaw_core::memory::vector::{VectorQuery, Embedding};
+
+let query_emb = Embedding::new(vec![0.1, 0.2, 0.3], "nomic-embed-text");
+let query = VectorQuery::new(query_emb)
+    .with_limit(10)
+    .with_min_similarity(0.7);
+
+let results = mem.vector_search(&query)?;
+for result in results {
+    println!("Similarity: {:.3} - {}", result.similarity, result.entry.content);
+}
+```
+
+**Algorithm:** Brute-force cosine scan over all entries with embeddings.
+
+**Source:** `vector.rs:120`, `sqlite.rs:288`
+
+#### `hybrid_search()`
+
+```rust
+fn hybrid_search(
+    &self,
+    text: &str,
+    query_embedding: &Embedding,
+    limit: usize,
+) -> Result<Vec<VectorSearchResult>>
+```
+
+Merges FTS5 keyword search and vector similarity search using Reciprocal Rank Fusion (RRF).
+
+**Parameters:**
+- `text`: Keyword query string
+- `query_embedding`: Query vector for semantic search
+- `limit`: Maximum results to return
+
+**Returns:** Merged and ranked results
+
+**Algorithm:**
+1. Run FTS5 keyword search → List A (ranked by BM25)
+2. Run vector similarity search → List B (ranked by cosine similarity)
+3. Merge lists using RRF scoring
+4. Return top `limit` results by RRF score
+
+**Example:**
+
+```rust
+let results = mem.hybrid_search(
+    "blood pressure",
+    &query_embedding,
+    20
+)?;
+
+// Results combine:
+// - Entries matching "blood pressure" (keyword)
+// - Entries semantically similar to query_embedding
+// - Entries in BOTH lists get boosted scores
+```
+
+**Source:** `vector.rs:122`, `sqlite.rs:334`
+
+#### `has_vector_support()`
+
+```rust
+fn has_vector_support(&self) -> bool
+```
+
+Returns `true` if the implementation supports vector search.
+
+**Source:** `vector.rs:131`
+
+#### `vector_stats()`
+
+```rust
+fn vector_stats(&self) -> Result<VectorStats>
+```
+
+Returns statistics about vector storage.
+
+**Returns:**
+
+```rust
+pub struct VectorStats {
+    pub embedded_count: usize,
+    pub unembedded_count: usize,
+    pub dimensions: usize,
+    pub model: String,
+}
+```
+
+**Example:**
+
+```rust
+let stats = mem.vector_stats()?;
+println!("Embedded entries: {}", stats.embedded_count);
+println!("Dimensions: {}", stats.dimensions);
+println!("Model: {}", stats.model);
+```
+
+**Source:** `vector.rs:134`, `sqlite.rs:385`
+
+## Data Types
+
+### Embedding
+
+```rust
+pub struct Embedding {
+    pub values: Vec<f32>,
+    pub model: String,
+}
+```
+
+Dense embedding vector with model metadata.
+
+**Methods:**
+
+```rust
+impl Embedding {
+    pub fn new(values: Vec<f32>, model: impl Into<String>) -> Self;
+    pub fn dim(&self) -> usize;
+    pub fn norm(&self) -> f32;
+    pub fn to_bytes(&self) -> Vec<u8>;
+    pub fn from_bytes(bytes: &[u8], model: impl Into<String>) -> Option<Self>;
+}
+```
+
+**Serialization:** Uses little-endian f32 encoding for SQLite BLOB storage.
+
+**Example:**
+
+```rust
+let emb = Embedding::new(vec![1.0, 2.0, 3.0], "nomic-embed-text");
+assert_eq!(emb.dim(), 3);
+
+let bytes = emb.to_bytes();
+let restored = Embedding::from_bytes(&bytes, "nomic-embed-text").unwrap();
+assert_eq!(restored.values, emb.values);
+```
+
+**Source:** `vector.rs:12`
+
+### VectorQuery
+
+```rust
+pub struct VectorQuery {
+    pub embedding: Embedding,
+    pub limit: usize,
+    pub min_similarity: f32,
+}
+```
+
+Query for vector search with builder methods.
+
+**Builder Methods:**
+
+```rust
+impl VectorQuery {
+    pub fn new(embedding: Embedding) -> Self;
+    pub fn with_limit(self, limit: usize) -> Self;
+    pub fn with_min_similarity(self, threshold: f32) -> Self;
+}
+```
+
+**Defaults:**
+- `limit`: 10
+- `min_similarity`: 0.0
+
+**Source:** `vector.rs:57`
+
+### VectorSearchResult
+
+```rust
+pub struct VectorSearchResult {
+    pub entry: MemoryEntry,
+    pub similarity: f32,
+}
+```
+
+A search result with similarity score (0.0 to 1.0).
+
+**Source:** `vector.rs:89`
+
+### VectorStats
+
+```rust
+pub struct VectorStats {
+    pub embedded_count: usize,
+    pub unembedded_count: usize,
+    pub dimensions: usize,
+    pub model: String,
+}
+```
+
+Statistics about vector storage in the database.
+
+**Source:** `vector.rs:98`
+
+## Algorithms
+
+### Cosine Similarity
+
+```rust
+pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32
+```
+
+Computes cosine similarity between two vectors.
+
+**Formula:**
+
+```
+sim(a, b) = (a · b) / (||a|| * ||b||)
+```
+
+**Range:** -1.0 (opposite) to 1.0 (identical)
+
+**Edge Cases:**
+- Returns 0.0 if dimensions mismatch
+- Returns 0.0 if either vector is zero-length
+- Returns 0.0 for empty vectors
+
+**Example:**
+
+```rust
+use oneclaw_core::memory::vector::cosine_similarity;
+
+let a = vec![1.0, 0.0, 0.0];
+let b = vec![0.9, 0.1, 0.0];
+
+let sim = cosine_similarity(&a, &b);
+assert!(sim > 0.9);  // High similarity
+```
+
+**Source:** `vector.rs:140`
+
+### Reciprocal Rank Fusion (RRF)
+
+```rust
+pub fn reciprocal_rank_fusion(
+    list_a: &[(String, f32)],
+    list_b: &[(String, f32)],
+) -> Vec<(String, f32)>
+```
+
+Merges two ranked lists using Reciprocal Rank Fusion.
+
+**Formula:**
+
+```
+score(doc) = Σ 1 / (k + rank_i(doc))
+```
+
+where `k = 60` (standard constant).
+
+**Properties:**
+- Documents appearing in both lists get boosted scores
+- Rank matters more than raw scores
+- Handles disjoint lists gracefully
+
+**Example:**
+
+```rust
+use oneclaw_core::memory::vector::reciprocal_rank_fusion;
+
+let fts_results = vec![
+    ("id1".into(), 0.9),  // FTS rank 1
+    ("id2".into(), 0.8),  // FTS rank 2
+];
+
+let vec_results = vec![
+    ("id1".into(), 0.95), // Vector rank 1
+    ("id3".into(), 0.85), // Vector rank 2
+];
+
+let merged = reciprocal_rank_fusion(&fts_results, &vec_results);
+// id1 gets highest score (appears in both lists at rank 1)
+```
+
+**Source:** `vector.rs:171`
+
+## Performance
+
+### Vector Search Complexity
+
+- **Time:** O(n * d) where n = entries with embeddings, d = dimensions
+- **Space:** O(n * d) for embedding storage
+- **Benchmark:** 1000 entries × 128-dim completes in under 100ms (brute force)
+
+**Source:** `sqlite.rs:823`
+
+### Hybrid Search Complexity
+
+1. **FTS5 Search:** O(log n) via inverted index
+2. **Vector Search:** O(n * d) brute force
+3. **RRF Merge:** O(m log m) where m = unique IDs
+
+**Total:** Dominated by vector search O(n * d)
+
+### Future Optimizations
+
+Planned improvements for production scale:
+
+- **ANN Indexing**: Approximate Nearest Neighbor (HNSW, IVF)
+- **Quantization**: Reduce f32 → int8 for 4× storage/bandwidth savings
+- **GPU Acceleration**: Batch vector operations on GPU
+
+## SqliteMemory Implementation
+
+`SqliteMemory` implements `VectorMemory` with:
+
+- **Storage**: f32 vectors as little-endian BLOBs
+- **Schema**: `embedding`, `embedding_model`, `embedding_dim` columns
+- **Migration**: Idempotent ALTER TABLE on initialization
+- **Search**: Brute-force cosine scan over all embedded entries
+
+See [SqliteMemory](/api/memory/sqlite) for implementation details.
+
+## Related
+
+- [Memory Traits](/api/memory/traits)
+- [SqliteMemory Implementation](/api/memory/sqlite)

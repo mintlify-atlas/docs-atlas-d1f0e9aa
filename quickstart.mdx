@@ -1,80 +1,275 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: Quickstart
+description: Get OneClaw running in minutes on your local machine or edge device
 ---
 
-## Get started in three steps
+Get OneClaw up and running in minutes. This guide will take you from building the binary to running your first AI agent.
 
-Get your documentation site running locally and make your first customization.
+## Prerequisites
 
-### Step 1: Set up your local environment
-
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
+<Steps>
+  <Step title="Install Rust">
+    OneClaw requires Rust 1.85 or later with edition 2024 support.
     
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
+    ```bash
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+    rustup update
+    ```
     
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
-
-### Step 2: Deploy your changes
-
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
+    Verify your installation:
     
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+    ```bash
+    rustc --version
+    # Should show: rustc 1.85.0 or later
+    ```
+  </Step>
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+  <Step title="Clone the repository">
+    ```bash
+    git clone https://github.com/nclamvn/oneclaw.git
+    cd oneclaw
+    ```
+  </Step>
+</Steps>
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+## Build and Run
 
-### Step 3: Go live
+<Steps>
+  <Step title="Build the binary">
+    Build OneClaw in release mode for optimal performance:
+    
+    ```bash
+    cargo build --release
+    ```
+    
+    This produces a ~3.4MB binary in `target/release/oneclaw-core`.
+  </Step>
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+  <Step title="Run OneClaw">
+    Start the interactive CLI:
+    
+    ```bash
+    cargo run --release -p oneclaw-core
+    ```
+    
+    You'll see the OneClaw prompt:
+    
+    ```
+    oneclaw>
+    ```
+  </Step>
 
-## Next steps
+  <Step title="Try basic commands">
+    Test the system with these commands:
+    
+    ```bash
+    # View system status
+    oneclaw> status
+    
+    # Store a memory
+    oneclaw> remember The project started in February 2026
+    
+    # Search memories
+    oneclaw> recall project start
+    
+    # View available commands
+    oneclaw> help
+    ```
+  </Step>
+</Steps>
 
-Now that you have your docs running, explore these key features:
+## Configuration
+
+<Steps>
+  <Step title="Create configuration file">
+    Create `config/default.toml` in your working directory:
+    
+    ```bash
+    mkdir -p config
+    ```
+  </Step>
+
+  <Step title="Configure an LLM provider">
+    Choose your provider and add configuration. OneClaw supports 6 providers:
+    
+    <CodeGroup>
+    ```toml Anthropic
+    [security]
+    deny_by_default = true
+
+    [provider]
+    primary = "anthropic"
+    model = "claude-sonnet-4-20250514"
+    max_tokens = 1024
+    temperature = 0.3
+    fallback = ["ollama"]
+
+    [provider.keys]
+    # Or set ANTHROPIC_API_KEY environment variable
+    # anthropic = "sk-ant-..."
+    ```
+
+    ```toml OpenAI
+    [security]
+    deny_by_default = true
+
+    [provider]
+    primary = "openai"
+    model = "gpt-4o-mini"
+    max_tokens = 1024
+    temperature = 0.3
+    fallback = ["ollama"]
+
+    [provider.keys]
+    # Or set OPENAI_API_KEY environment variable
+    # openai = "sk-..."
+    ```
+
+    ```toml Ollama (Local)
+    [security]
+    deny_by_default = false  # Development mode
+
+    [provider]
+    primary = "ollama"
+    model = "llama3.2:3b"
+    max_tokens = 1024
+    temperature = 0.3
+
+    # No API key needed for local Ollama
+    ```
+    </CodeGroup>
+  </Step>
+
+  <Step title="Set API keys (if using cloud providers)">
+    Set environment variables for your chosen provider:
+    
+    ```bash
+    # Anthropic
+    export ANTHROPIC_API_KEY="sk-ant-..."
+    
+    # OpenAI
+    export OPENAI_API_KEY="sk-..."
+    
+    # Google (Gemini)
+    export GOOGLE_API_KEY="AIza..."
+    
+    # Or use the generic key
+    export ONECLAW_API_KEY="your-key-here"
+    ```
+  </Step>
+</Steps>
+
+## First AI Interaction
+
+With a provider configured, you can now use the `ask` command:
+
+```bash
+oneclaw> ask What is OneClaw?
+
+# OneClaw will route your question to the configured LLM provider
+# and return a response based on its training data
+```
+
+## Example Session
+
+Here's a complete example session showing OneClaw's key features:
+
+```bash
+# Start OneClaw
+$ cargo run --release -p oneclaw-core
+
+oneclaw> status
+Runtime Status:
+  Security: DefaultSecurity (deny-by-default)
+  Memory: SqliteMemory (0 entries)
+  Provider: Anthropic (claude-sonnet-4-20250514)
+  Uptime: 0.12s
+
+oneclaw> remember OneClaw is a 6-layer AI agent kernel for edge devices
+
+oneclaw> recall agent kernel
+Found 1 result:
+  [2026-03-02 07:30] OneClaw is a 6-layer AI agent kernel for edge devices
+
+oneclaw> ask What are the benefits of edge AI?
+[LLM Response: Benefits of edge AI include low latency, data privacy, 
+offline operation, reduced bandwidth costs, and real-time processing...]
+
+oneclaw> providers
+Available LLM Providers:
+  ✓ anthropic (claude-sonnet-4-20250514) - Active
+  ✓ ollama (llama3.2:3b) - Fallback
+  ✗ openai - No API key
+  ✗ deepseek - No API key
+
+oneclaw> metrics
+Operational Metrics:
+  Messages processed: 4
+  LLM calls: 1
+  Memory operations: 2
+  Average LLM latency: 247ms
+
+oneclaw> exit
+Shutting down...
+```
+
+## Command Reference
+
+| Command | Description |
+|---------|-------------|
+| `status` | System overview with metrics |
+| `health` | Layer-by-layer health check |
+| `remember <text>` | Store in memory |
+| `recall <query>` | Search memory (hybrid FTS5 + vector) |
+| `ask <question>` | Query LLM with context |
+| `providers` | List LLM provider status |
+| `tools` | List available tools |
+| `channels` | List active channels |
+| `help` | Show all commands |
+| `exit` | Graceful shutdown |
+
+## Optional: Vector Search
+
+To enable semantic memory search with embeddings:
+
+<Steps>
+  <Step title="Configure embedding provider">
+    Add to your `config/default.toml`:
+    
+    ```toml
+    [embedding]
+    provider = "ollama"
+    model = "nomic-embed-text"
+    ```
+  </Step>
+
+  <Step title="Install embedding model (if using Ollama)">
+    ```bash
+    ollama pull nomic-embed-text
+    ```
+  </Step>
+
+  <Step title="Restart OneClaw">
+    Memories will now be automatically embedded for semantic search using hybrid FTS5 + vector + RRF fusion.
+  </Step>
+</Steps>
+
+## Next Steps
 
 <CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
+  <Card title="Core Concepts" icon="book" href="/concepts/architecture">
+    Learn about OneClaw's 6-layer architecture
+  </Card>
+  
+  <Card title="Configuration" icon="gear" href="/configuration/overview">
+    Deep dive into configuration options
+  </Card>
+  
+  <Card title="Deployment" icon="server" href="/deployment/edge-devices">
+    Deploy to Raspberry Pi and other edge devices
+  </Card>
+  
+  <Card title="API Reference" icon="code" href="/api/runtime">
+    Explore the complete API documentation
+  </Card>
 </CardGroup>
-
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>

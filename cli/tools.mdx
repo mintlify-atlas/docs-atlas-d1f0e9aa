@@ -1,0 +1,270 @@
+---
+title: Tool Commands
+description: Execute sandboxed external actions via the tool registry
+---
+
+## tools
+
+List all registered tools with descriptions and parameters.
+
+**Usage:**
+```
+tools
+```
+
+**Example Output:**
+```
+Registered Tools (3):
+  [system] system_info — Get system information (CPU, memory, disk) (params: none)
+  [io] file_write — Write content to a file (params: path*, content*)
+  [notification] notify — Send notification via event bus (params: message*, priority)
+```
+
+**Security:** Requires `system:tools` authorization
+
+**Field Descriptions:**
+- **[category]:** Tool classification (system, io, notification, etc.)
+- **name:** Tool identifier for execution
+- **description:** Human-readable purpose
+- **params:** Required parameters marked with `*`, optional without
+
+**No Tools:**
+```
+Registered Tools (0):
+  No tools registered.
+```
+
+## tool
+
+Execute a specific tool with key=value parameters.
+
+**Usage:**
+```
+tool <name> [key=value ...]
+```
+
+**Example (no parameters):**
+```
+> tool system_info
+[OK] system_info: {"cpu_usage":23.5,"memory_mb":512,"disk_free_gb":42.3}
+```
+
+**Example (with parameters):**
+```
+> tool file_write path=/tmp/test.txt content="Hello OneClaw"
+[OK] file_write: File written successfully to /tmp/test.txt (13 bytes)
+```
+
+**Example (notification):**
+```
+> tool notify message="Temperature threshold exceeded" priority=high
+[OK] notify: Event published: system/alert
+```
+
+**Security:** Requires `tool:<name>` authorization (per-tool access control)
+
+**Error Handling:**
+
+**Missing required parameter:**
+```
+> tool file_write path=/tmp/test.txt
+[FAIL] file_write: Missing required parameter: content
+```
+
+**Tool not found:**
+```
+> tool nonexistent
+Tool error: Tool 'nonexistent' not found
+```
+
+**Execution failure:**
+```
+> tool file_write path=/read-only/file.txt content="test"
+[FAIL] file_write: Permission denied: /read-only/file.txt
+```
+
+## Built-in Tools
+
+### system_info
+
+Retrieve current system resource usage.
+
+**Category:** system
+
+**Parameters:** None
+
+**Example:**
+```
+> tool system_info
+[OK] system_info: {"cpu_usage":23.5,"memory_mb":512,"disk_free_gb":42.3,"uptime_secs":8130}
+```
+
+**Output Fields:**
+- `cpu_usage`: CPU utilization percentage (0-100)
+- `memory_mb`: Memory usage in megabytes
+- `disk_free_gb`: Available disk space in gigabytes
+- `uptime_secs`: System uptime in seconds
+
+**Use Cases:**
+- Health monitoring
+- Resource alerts
+- Capacity planning
+
+### file_write
+
+Write content to a file on the local filesystem.
+
+**Category:** io
+
+**Parameters:**
+- `path*` (required): Absolute or relative file path
+- `content*` (required): Text content to write
+
+**Example:**
+```
+> tool file_write path=/var/log/oneclaw.log content="Log entry: system started"
+[OK] file_write: File written successfully to /var/log/oneclaw.log (28 bytes)
+```
+
+**Security Considerations:**
+- Sandboxed by OS permissions
+- No path traversal validation (relies on filesystem ACLs)
+- Requires `tool:file_write` authorization
+
+**Error Cases:**
+- Permission denied: Insufficient write access
+- Invalid path: Directory doesn't exist
+- Disk full: No available space
+
+### notify
+
+Publish a notification event to the event bus.
+
+**Category:** notification
+
+**Parameters:**
+- `message*` (required): Notification text
+- `priority` (optional): `low`, `normal`, `high`, `critical` (default: `normal`)
+
+**Example:**
+```
+> tool notify message="Sensor A1 offline" priority=high
+[OK] notify: Event published: system/alert
+```
+
+**Behavior:**
+1. Creates event with topic `system/alert`
+2. Publishes to event bus
+3. Subscribers receive event (e.g., alert channels, logging handlers)
+
+**Event Structure:**
+```rust
+Event {
+    topic: "system/alert",
+    source: "tool:notify",
+    priority: Priority::High,
+    payload: { "message": "Sensor A1 offline" },
+    timestamp: 2026-03-02T14:30:00Z,
+}
+```
+
+**Use Cases:**
+- Alert generation
+- Workflow triggers
+- Audit logging
+
+## Custom Tools
+
+Register custom tools programmatically:
+
+```rust
+use oneclaw_core::tool::{ToolRegistry, ToolDefinition, ToolParam, ToolResult};
+
+let mut registry = ToolRegistry::new();
+
+registry.register(ToolDefinition {
+    name: "send_email".into(),
+    description: "Send email via SMTP".into(),
+    category: "notification".into(),
+    params: vec![
+        ToolParam { name: "to".into(), required: true, description: "Recipient".into() },
+        ToolParam { name: "subject".into(), required: true, description: "Subject line".into() },
+        ToolParam { name: "body".into(), required: true, description: "Email body".into() },
+    ],
+    handler: Box::new(|params, _event_bus| {
+        let to = params.get("to").ok_or("Missing 'to'")?;
+        let subject = params.get("subject").ok_or("Missing 'subject'")?;
+        let body = params.get("body").ok_or("Missing 'body'")?;
+        
+        // SMTP logic here
+        
+        Ok(ToolResult {
+            success: true,
+            output: format!("Email sent to {}", to),
+        })
+    }),
+});
+```
+
+**CLI Usage:**
+```
+> tools
+Registered Tools (4):
+  ...
+  [notification] send_email — Send email via SMTP (params: to*, subject*, body*)
+
+> tool send_email to=admin@example.com subject="Alert" body="System ready"
+[OK] send_email: Email sent to admin@example.com
+```
+
+## Tool Sandboxing
+
+Tools execute in a controlled environment:
+
+1. **Parameter validation:** Required params checked before execution
+2. **Error isolation:** Tool failures don't crash runtime
+3. **Event bus access:** Optional pub/sub integration
+4. **Security gates:** Per-tool authorization (`tool:<name>`)
+
+**Metrics Tracking:**
+
+```
+> metrics
+...
+Tools:
+  Calls: 8
+  Failed: 0
+...
+```
+
+**Logging:**
+```
+[INFO] Executing tool: system_info
+[INFO] Tool result: success=true output_len=87
+```
+
+## Tool Parameters
+
+**Parsing Rules:**
+- Space-separated: `key=value key2=value2`
+- No quotes needed for values without spaces
+- Quotes for values with spaces: `message="Hello World"`
+
+**Example:**
+```
+tool file_write path=/tmp/test.txt content="Multi word content"
+```
+
+**Parsed:**
+```rust
+{
+    "path": "/tmp/test.txt",
+    "content": "Multi word content",
+}
+```
+
+**Invalid Syntax:**
+```
+> tool file_write path value
+[FAIL] file_write: Invalid parameter format (expected key=value)
+```

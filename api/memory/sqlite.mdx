@@ -1,0 +1,266 @@
+---
+title: SqliteMemory
+description: SQLite-backed persistent memory implementation with FTS5 full-text search
+---
+
+## Overview
+
+`SqliteMemory` is a production-ready implementation of the `Memory` trait using SQLite for persistent storage. It features:
+
+- **FTS5 Full-Text Search**: Fast keyword search with Unicode support
+- **Temporal Indexing**: B-tree indexes for efficient time-range queries
+- **Vector Storage**: Optional embedding storage for semantic search (TIP-040)
+- **Thread-Safe**: Uses `Mutex<Connection>` for concurrent access
+
+## Struct Definition
+
+```rust
+pub struct SqliteMemory {
+    conn: Mutex<Connection>,
+}
+```
+
+**Source:** `sqlite.rs:14`
+
+## Constructors
+
+### `new()`
+
+```rust
+pub fn new(db_path: impl AsRef<Path>) -> Result<Self>
+```
+
+Creates a new `SqliteMemory` instance with a database file at the specified path. Creates parent directories if they don't exist.
+
+**Example:**
+
+```rust
+use oneclaw_core::memory::SqliteMemory;
+
+let mem = SqliteMemory::new("/data/oneclaw/memory.db")?;
+```
+
+**Source:** `sqlite.rs:20`
+
+### `in_memory()`
+
+```rust
+pub fn in_memory() -> Result<Self>
+```
+
+Creates an in-memory database for testing. Data is lost when the instance is dropped.
+
+**Example:**
+
+```rust
+let mem = SqliteMemory::in_memory()?;
+```
+
+**Source:** `sqlite.rs:37`
+
+## Database Schema
+
+### Tables
+
+#### `memory_entries`
+
+```sql
+CREATE TABLE memory_entries (
+    id TEXT PRIMARY KEY,
+    content TEXT NOT NULL,
+    tags TEXT NOT NULL DEFAULT '[]',
+    priority INTEGER NOT NULL DEFAULT 1,
+    source TEXT NOT NULL DEFAULT 'system',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    embedding BLOB,              -- TIP-040: vector column
+    embedding_model TEXT,
+    embedding_dim INTEGER DEFAULT 0
+);
+```
+
+**Source:** `sqlite.rs:54`
+
+#### `memory_fts` (FTS5 Virtual Table)
+
+```sql
+CREATE VIRTUAL TABLE memory_fts USING fts5(
+    content,
+    tags,
+    content=memory_entries,
+    content_rowid=rowid,
+    tokenize='unicode61 remove_diacritics 2'
+);
+```
+
+FTS5 virtual table for fast full-text search with Unicode support and diacritic removal.
+
+**Source:** `sqlite.rs:74`
+
+### Indexes
+
+- **`idx_memory_created_at`**: B-tree index on `created_at` for temporal range queries
+- **`idx_memory_priority`**: Index on `priority` for filtering
+- **`idx_memory_source`**: Index on `source` field
+
+**Source:** `sqlite.rs:65`
+
+### Triggers
+
+Automatic triggers keep the FTS5 table synchronized with `memory_entries`:
+
+- **`memory_ai`**: After INSERT - adds to FTS5
+- **`memory_ad`**: After DELETE - removes from FTS5
+- **`memory_au`**: After UPDATE - updates FTS5
+
+**Source:** `sqlite.rs:83`
+
+## FTS5 Full-Text Search
+
+`SqliteMemory` uses SQLite's FTS5 (Full-Text Search 5) extension for keyword search.
+
+### Features
+
+- **Unicode Support**: `unicode61` tokenizer handles international text
+- **Diacritic Removal**: Searches ignore accents (e.g., "cafe" matches "café")
+- **Ranking**: Results ranked by FTS5's BM25 algorithm
+- **Automatic Sync**: Triggers maintain FTS5 index consistency
+
+### Example
+
+```rust
+use oneclaw_core::memory::{SqliteMemory, Memory, MemoryQuery, MemoryMeta};
+
+let mem = SqliteMemory::in_memory()?;
+
+// Store Vietnamese text
+mem.store("Huyết áp bà Nguyễn 140/90", MemoryMeta::default())?;
+mem.store("Nhiệt độ ông Trần 37.5", MemoryMeta::default())?;
+
+// Search finds entries
+let results = mem.search(&MemoryQuery::new("Nguyễn"))?;
+assert_eq!(results.len(), 1);
+```
+
+**Source:** `sqlite.rs:189`
+
+## Search Implementation
+
+### FTS5 Query Builder
+
+```rust
+fn build_fts_query(query: &MemoryQuery) -> String
+```
+
+Builds an FTS5 search query with temporal and priority filters:
+
+```sql
+SELECT e.id, e.content, e.tags, e.priority, e.source, e.created_at, e.updated_at
+FROM memory_entries e
+JOIN memory_fts f ON e.rowid = f.rowid
+WHERE memory_fts MATCH ?1
+  AND e.created_at >= ?2
+  AND e.priority >= ?3
+ORDER BY rank LIMIT ?4
+```
+
+**Source:** `sqlite.rs:460`
+
+### Filtered Query (No FTS)
+
+When `query.text` is empty, uses a simpler filtered query:
+
+```rust
+fn build_filtered_query(query: &MemoryQuery) -> String
+```
+
+**Source:** `sqlite.rs:487`
+
+## Vector Storage (TIP-040)
+
+`SqliteMemory` implements the `VectorMemory` trait for semantic search.
+
+### Migration
+
+Vector columns are added via idempotent migration on first initialization:
+
+```rust
+fn migrate_vector_columns(&self, conn: &Connection) -> Result<()>
+```
+
+**Columns Added:**
+- `embedding`: BLOB storing f32 vectors (little-endian)
+- `embedding_model`: Model name (e.g., "nomic-embed-text")
+- `embedding_dim`: Dimensionality of the embedding
+
+**Source:** `sqlite.rs:108`
+
+### Example
+
+```rust
+use oneclaw_core::memory::{SqliteMemory, VectorMemory, MemoryMeta};
+use oneclaw_core::memory::vector::Embedding;
+
+let mem = SqliteMemory::in_memory()?;
+let embedding = Embedding::new(vec![1.0, 2.0, 3.0], "test-model");
+
+let id = mem.store_with_embedding(
+    "blood pressure reading 140/90",
+    MemoryMeta::default(),
+    &embedding
+)?;
+
+// Entry is retrievable via normal get()
+let entry = mem.get(&id)?.unwrap();
+assert_eq!(entry.content, "blood pressure reading 140/90");
+```
+
+**Source:** `sqlite.rs:267`
+
+See [Vector Search API](/api/memory/vector) for vector search methods.
+
+## Implementation Details
+
+### Thread Safety
+
+```rust
+fn lock_conn(&self) -> Result<std::sync::MutexGuard<'_, Connection>>
+```
+
+Internal helper that locks the connection mutex with poison recovery.
+
+**Source:** `sqlite.rs:133`
+
+### Row Conversion
+
+```rust
+struct RawEntry {
+    id: String,
+    content: String,
+    tags: String,
+    priority: i32,
+    source: String,
+    created_at: String,
+    updated_at: String,
+}
+
+impl RawEntry {
+    fn into_memory_entry(self) -> Result<MemoryEntry>
+}
+```
+
+Internal type for deserializing SQLite rows into `MemoryEntry` structs.
+
+**Source:** `sqlite.rs:422`
+
+## Performance Characteristics
+
+- **FTS5 Search**: O(log n) for keyword lookup with BM25 ranking
+- **Temporal Range**: O(log n) via B-tree index on `created_at`
+- **Vector Search**: O(n) brute-force cosine scan (future: ANN index)
+- **Concurrent Access**: Thread-safe but single-writer (SQLite limitation)
+
+## Related
+
+- [Memory Traits](/api/memory/traits)
+- [Vector Search API](/api/memory/vector)

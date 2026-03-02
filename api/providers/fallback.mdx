@@ -1,0 +1,596 @@
+---
+title: Fallback Chain & Reliability
+description: FallbackChain and ReliableProvider for automatic failover and retry logic
+---
+
+## Overview
+
+OneClaw provides two wrapper types for building resilient multi-provider systems:
+
+- **`FallbackChain`** - Try providers in order until one succeeds
+- **`ReliableProvider`** - Wrap any provider with automatic retry logic
+
+These enable **graceful degradation**: primary provider fails → try secondary → fall back to local.
+
+---
+
+## FallbackChain
+
+**Try multiple providers in order until one succeeds.**
+
+### Concept
+
+A `FallbackChain` wraps multiple providers and attempts each in sequence:
+
+1. Check if provider is available (`is_available()`)
+2. Skip unavailable providers
+3. Try to call the provider
+4. On error, log and try next provider
+5. Return first successful response
+6. If all fail, return error
+
+### Construction
+
+```rust
+use oneclaw_core::provider::{FallbackChain, Provider};
+
+let chain = FallbackChain::new(vec![
+    Box::new(anthropic_provider),  // 1st: Primary (cloud)
+    Box::new(openai_provider),     // 2nd: Secondary (cloud)
+    Box::new(ollama_provider),     // 3rd: Local fallback
+]);
+
+// Chain implements Provider trait
+let response = chain.chat("system prompt", "user message")?;
+println!("Responded by: {}", response.provider_id);
+```
+
+### Provider Strategy
+
+**OneClaw's recommended fallback strategy:**
+
+```
+Primary (cloud)  →  Secondary (cloud)  →  Local (Ollama)
+```
+
+**Example:**
+```rust
+use oneclaw_core::provider::{
+    FallbackChain, AnthropicProvider, OpenAICompatibleProvider,
+    OllamaProvider, ProviderConfig,
+};
+
+// 1. Primary: Anthropic Claude (best quality)
+let anthropic = AnthropicProvider::new(ProviderConfig {
+    provider_id: "anthropic".into(),
+    model: "claude-sonnet-4-20250514".into(),
+    api_key: Some(std::env::var("ANTHROPIC_API_KEY").ok()),
+    max_tokens: 1024,
+    temperature: 0.3,
+    endpoint: None,
+})?;
+
+// 2. Secondary: OpenAI GPT (fallback)
+let openai = OpenAICompatibleProvider::openai(ProviderConfig {
+    provider_id: "openai".into(),
+    model: "gpt-4o".into(),
+    api_key: Some(std::env::var("OPENAI_API_KEY").ok()),
+    max_tokens: 1024,
+    temperature: 0.3,
+    endpoint: None,
+})?;
+
+// 3. Local: Ollama (offline fallback)
+let ollama = OllamaProvider::default_local()?;
+
+// Build chain
+let chain = FallbackChain::new(vec![
+    Box::new(anthropic),
+    Box::new(openai),
+    Box::new(ollama),
+]);
+
+if !chain.is_available() {
+    eprintln!("No providers available!");
+}
+
+println!("Provider chain: {}", chain.provider_info());
+// Output: "anthropic → openai → ollama"
+```
+
+### Methods
+
+#### `new(providers: Vec<Box<dyn Provider>>) -> Self`
+Create a new fallback chain from an ordered list of providers.
+
+#### `len() -> usize`
+Number of providers in the chain.
+
+#### `is_empty() -> bool`
+Whether the chain has no providers.
+
+#### `provider_info() -> String`
+Return a string showing the provider sequence: `"anthropic → openai → ollama"`.
+
+### Provider Trait Implementation
+
+`FallbackChain` implements `Provider`, so it can be used anywhere a `Provider` is expected:
+
+```rust
+// FallbackChain is a Provider
+let provider: Box<dyn Provider> = Box::new(chain);
+
+// Use like any other provider
+let response = provider.chat("system", "user message")?;
+```
+
+### Behavior
+
+#### Availability Check
+
+```rust
+impl Provider for FallbackChain {
+    fn is_available(&self) -> bool {
+        // Returns true if ANY provider is available
+        self.providers.iter().any(|p| p.is_available())
+    }
+}
+```
+
+#### Chat Method
+
+```rust
+impl Provider for FallbackChain {
+    fn chat(&self, system: &str, user_message: &str) -> Result<ProviderResponse> {
+        for provider in &self.providers {
+            // Skip unavailable providers
+            if !provider.is_available() {
+                tracing::debug!(provider = provider.id(), "Skipping unavailable");
+                continue;
+            }
+
+            // Try provider
+            match provider.chat(system, user_message) {
+                Ok(response) => {
+                    tracing::info!(provider = provider.id(), "Provider responded");
+                    return Ok(response);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        provider = provider.id(),
+                        error = %e,
+                        "Provider failed, trying next"
+                    );
+                }
+            }
+        }
+
+        Err(OneClawError::Provider(
+            "All providers in fallback chain failed".into()
+        ))
+    }
+}
+```
+
+### Use Cases
+
+#### Multi-Cloud Redundancy
+
+```rust
+let chain = FallbackChain::new(vec![
+    Box::new(anthropic_provider),  // Primary
+    Box::new(openai_provider),     // Fallback 1
+    Box::new(google_provider),     // Fallback 2
+]);
+
+// If Anthropic is down, automatically uses OpenAI
+// If OpenAI is also down, uses Google
+```
+
+#### Cloud + Local Hybrid
+
+```rust
+let chain = FallbackChain::new(vec![
+    Box::new(openai_provider),   // Cloud (internet required)
+    Box::new(ollama_provider),   // Local (offline capable)
+]);
+
+// Normally uses OpenAI
+// If internet down or API key exhausted, falls back to local Ollama
+```
+
+#### Cost Optimization
+
+```rust
+let chain = FallbackChain::new(vec![
+    Box::new(deepseek_provider),  // Cheap ($0.14/M tokens)
+    Box::new(anthropic_provider), // Expensive ($3/M tokens)
+]);
+
+// Normally uses cheaper DeepSeek
+// Only uses expensive Anthropic if DeepSeek fails
+```
+
+---
+
+## ReliableProvider
+
+**Wrap any provider with automatic retry logic.**
+
+### Concept
+
+A `ReliableProvider` wraps a single provider and retries failed requests automatically:
+
+1. Try to call the inner provider
+2. On error, log warning and retry
+3. Repeat up to `max_retries` times
+4. Return first successful response
+5. If all attempts fail, return last error
+
+### Construction
+
+```rust
+use oneclaw_core::provider::{ReliableProvider, AnthropicProvider};
+
+let provider = AnthropicProvider::new(config)?;
+
+// Wrap with retry logic (3 retries = 4 attempts total)
+let reliable_provider = ReliableProvider::new(provider, 3);
+
+// Use like normal provider
+let response = reliable_provider.chat("system", "user message")?;
+```
+
+### Retry Logic
+
+**Total attempts = 1 (initial) + `max_retries`**
+
+Example with `max_retries = 2`:
+
+```
+Attempt 1: Call provider → Error
+Attempt 2: Retry → Error
+Attempt 3: Retry → Success → Return response
+```
+
+Example with `max_retries = 2` (all fail):
+
+```
+Attempt 1: Call provider → Error
+Attempt 2: Retry → Error
+Attempt 3: Retry → Error → Return error
+```
+
+### Methods
+
+#### `new(inner: P, max_retries: u32) -> Self`
+Create a new reliable provider wrapping `inner` with `max_retries` retry attempts.
+
+### Provider Trait Implementation
+
+```rust
+impl<P: Provider> Provider for ReliableProvider<P> {
+    fn id(&self) -> &'static str {
+        self.inner.id() // Delegates to inner provider
+    }
+
+    fn display_name(&self) -> &str {
+        self.inner.display_name()
+    }
+
+    fn is_available(&self) -> bool {
+        self.inner.is_available()
+    }
+
+    fn chat(&self, system: &str, user_message: &str) -> Result<ProviderResponse> {
+        let mut last_err = None;
+
+        for attempt in 0..=self.max_retries {
+            match self.inner.chat(system, user_message) {
+                Ok(response) => return Ok(response),
+                Err(e) => {
+                    tracing::warn!(
+                        provider = self.inner.id(),
+                        attempt = attempt + 1,
+                        error = %e,
+                        "Provider call failed, retrying"
+                    );
+                    last_err = Some(e);
+                }
+            }
+        }
+
+        Err(last_err.expect("at least one attempt was made"))
+    }
+}
+```
+
+### Use Cases
+
+#### Transient Network Errors
+
+```rust
+let anthropic = AnthropicProvider::new(config)?;
+let reliable = ReliableProvider::new(anthropic, 3);
+
+// If network hiccup causes timeout, automatically retries
+let response = reliable.chat("system", "message")?;
+```
+
+#### Rate Limit Handling
+
+```rust
+let openai = OpenAICompatibleProvider::openai(config)?;
+let reliable = ReliableProvider::new(openai, 2);
+
+// If rate limited (429 error), retries after brief pause
+// Note: No built-in backoff - add sleep for production
+```
+
+#### API Flakiness
+
+```rust
+let groq = OpenAICompatibleProvider::groq(config)?;
+let reliable = ReliableProvider::new(groq, 5);
+
+// Groq inference can be flaky - retry up to 5 times
+```
+
+---
+
+## Combining FallbackChain + ReliableProvider
+
+**Build ultra-resilient systems by combining both:**
+
+```rust
+use oneclaw_core::provider::{
+    FallbackChain, ReliableProvider,
+    AnthropicProvider, OpenAICompatibleProvider, OllamaProvider,
+};
+
+// Each provider wrapped with retry logic
+let anthropic = AnthropicProvider::new(anthropic_config)?;
+let reliable_anthropic = ReliableProvider::new(anthropic, 2);
+
+let openai = OpenAICompatibleProvider::openai(openai_config)?;
+let reliable_openai = ReliableProvider::new(openai, 2);
+
+let ollama = OllamaProvider::default_local()?;
+let reliable_ollama = ReliableProvider::new(ollama, 1);
+
+// Build fallback chain of reliable providers
+let chain = FallbackChain::new(vec![
+    Box::new(reliable_anthropic),  // Try Anthropic (with 2 retries)
+    Box::new(reliable_openai),     // Then OpenAI (with 2 retries)
+    Box::new(reliable_ollama),     // Finally Ollama (with 1 retry)
+]);
+
+// Ultra-resilient:
+// - Each provider retries on transient errors
+// - Falls back to next provider on persistent errors
+// - Total up to 3 providers × retries = many attempts
+
+let response = chain.chat("system", "message")?;
+println!("Responded by: {}", response.provider_id);
+```
+
+### Resilience Levels
+
+| Configuration | Resilience | Max Attempts |
+|--------------|------------|-------------|
+| Single provider | None | 1 |
+| `ReliableProvider(provider, 2)` | Low | 3 |
+| `FallbackChain([p1, p2, p3])` | Medium | 3 |
+| `FallbackChain([Reliable(p1), Reliable(p2), Reliable(p3)])` | **High** | 9+ |
+
+---
+
+## Chain Builder (Config-Driven)
+
+OneClaw provides a config-driven chain builder:
+
+```toml
+# oneclaw.toml
+[provider]
+primary = "anthropic"
+model = "claude-sonnet-4-20250514"
+api_key_env = "ANTHROPIC_API_KEY"
+max_tokens = 1024
+temperature = 0.3
+
+# Fallback chain
+fallback = ["openai", "ollama"]
+```
+
+```rust
+use oneclaw_core::provider::build_provider_chain;
+
+let config = load_config_from_toml()?;
+let chain = build_provider_chain(&config)?;
+
+// Automatically builds: anthropic → openai → ollama
+let response = chain.chat("system", "message")?;
+```
+
+See `chain_builder.rs` source for implementation details.
+
+---
+
+## Logging and Observability
+
+Both `FallbackChain` and `ReliableProvider` emit structured logs via `tracing`:
+
+```rust
+use tracing_subscriber;
+
+tracing_subscriber::fmt::init();
+
+let chain = FallbackChain::new(vec![...]);
+let response = chain.chat("system", "message")?;
+```
+
+**Log Output:**
+```
+DEBUG provider=anthropic: Skipping unavailable provider
+WARN  provider=openai error="timeout": Provider failed, trying next
+INFO  provider=ollama: Provider responded
+```
+
+### Recommended Logging Setup
+
+```rust
+use tracing_subscriber::{
+    fmt,
+    EnvFilter,
+};
+
+tracing_subscriber::fmt()
+    .with_env_filter(EnvFilter::from_default_env()
+        .add_directive("oneclaw_core::provider=info".parse()?))
+    .init();
+```
+
+**Environment Variable:**
+```bash
+export RUST_LOG=oneclaw_core::provider=debug
+```
+
+---
+
+## Best Practices
+
+### 1. Order Providers by Preference
+
+Place highest-quality/fastest providers first:
+
+```rust
+FallbackChain::new(vec![
+    Box::new(claude),   // Best quality
+    Box::new(gpt4),     // Good quality
+    Box::new(ollama),   // Offline fallback
+])
+```
+
+### 2. Always Include Local Fallback
+
+Ensure system works offline:
+
+```rust
+FallbackChain::new(vec![
+    Box::new(cloud_provider),
+    Box::new(OllamaProvider::default_local()?),  // Always works if Ollama running
+])
+```
+
+### 3. Limit Retries
+
+Avoid excessive retries (increases latency):
+
+```rust
+// ✅ Good: 2-3 retries
+ReliableProvider::new(provider, 2)
+
+// ❌ Bad: Too many retries
+ReliableProvider::new(provider, 10)  // 11 total attempts!
+```
+
+### 4. Monitor Fallback Usage
+
+Log when fallback activates to detect primary provider issues:
+
+```rust
+if response.provider_id != "anthropic" {
+    tracing::warn!(
+        primary = "anthropic",
+        actual = response.provider_id,
+        "Fallback provider used - check primary provider"
+    );
+}
+```
+
+### 5. Test Failure Scenarios
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_fallback_when_primary_fails() {
+        let chain = FallbackChain::new(vec![
+            Box::new(FailingTestProvider),    // Always fails
+            Box::new(NoopTestProvider),       // Always succeeds
+        ]);
+
+        let response = chain.chat("", "test").unwrap();
+        assert_eq!(response.provider_id, "noop-test");
+    }
+}
+```
+
+---
+
+## Graceful Degradation Example
+
+**Complete production-ready setup:**
+
+```rust
+use oneclaw_core::provider::{
+    FallbackChain, ReliableProvider,
+    AnthropicProvider, OpenAICompatibleProvider, OllamaProvider,
+    ProviderConfig,
+};
+
+// 1. Configure providers
+let anthropic = ReliableProvider::new(
+    AnthropicProvider::new(ProviderConfig {
+        provider_id: "anthropic".into(),
+        model: "claude-sonnet-4-20250514".into(),
+        api_key: std::env::var("ANTHROPIC_API_KEY").ok(),
+        max_tokens: 1024,
+        temperature: 0.3,
+        endpoint: None,
+    })?,
+    2  // 2 retries
+);
+
+let deepseek = ReliableProvider::new(
+    OpenAICompatibleProvider::deepseek(ProviderConfig {
+        provider_id: "deepseek".into(),
+        model: "deepseek-chat".into(),
+        api_key: std::env::var("DEEPSEEK_API_KEY").ok(),
+        max_tokens: 1024,
+        temperature: 0.3,
+        endpoint: None,
+    })?,
+    2
+);
+
+let ollama = OllamaProvider::default_local()?;
+
+// 2. Build resilient chain
+let chain = FallbackChain::new(vec![
+    Box::new(anthropic),   // Primary: Claude (best quality)
+    Box::new(deepseek),    // Secondary: DeepSeek (cheap)
+    Box::new(ollama),      // Tertiary: Ollama (offline)
+]);
+
+// 3. Use with confidence
+let response = chain.chat(
+    "You are a helpful assistant.",
+    "What is the weather like?"
+)?;
+
+tracing::info!(
+    provider = response.provider_id,
+    "Request completed successfully"
+);
+```
+
+**This setup provides:**
+- ✅ High quality (Claude primary)
+- ✅ Cost efficiency (DeepSeek secondary)
+- ✅ Offline capability (Ollama tertiary)
+- ✅ Automatic retries (2 per provider)
+- ✅ Graceful degradation (9+ total attempts)
+- ✅ Zero downtime (always has fallback)

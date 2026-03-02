@@ -1,0 +1,454 @@
+---
+title: Device Pairing API
+description: Secure device pairing flow with one-time codes and TTL expiry
+---
+
+# Device Pairing API
+
+Device pairing authenticates new devices using cryptographically random one-time codes with TTL expiry. Once paired, devices gain authorization to perform actions.
+
+## Pairing Flow
+
+The pairing flow follows these steps:
+
+1. **Generate pairing code** - Server creates a 6-digit one-time code
+2. **Display code** - Show code to user (e.g., on screen, terminal)
+3. **Device verification** - Device submits code for verification
+4. **Grant access** - Device receives identity and is added to paired devices
+
+## Core Methods
+
+### `generate_pairing_code()`
+
+Generate a cryptographically random 6-digit one-time pairing code.
+
+```rust
+fn generate_pairing_code(&self) -> Result<String>
+```
+
+**Source:** `crates/oneclaw-core/src/security/traits.rs:83`
+
+**Returns:**
+- `Result<String>` - 6-digit numeric code (e.g., `"042815"`)
+
+**Errors:**
+- `OneClawError::Security` - If RNG fails or lock is poisoned
+
+### `verify_pairing_code()`
+
+Verify a pairing code and return device identity. Code is consumed (one-time use).
+
+```rust
+fn verify_pairing_code(&self, code: &str) -> Result<Identity>
+```
+
+**Source:** `crates/oneclaw-core/src/security/traits.rs:86`
+
+**Parameters:**
+- `code: &str` - The 6-digit pairing code to verify
+
+**Returns:**
+- `Result<Identity>` - Device identity with unique device ID
+
+**Errors:**
+- `OneClawError::Security("Invalid pairing code")` - Code not found
+- `OneClawError::Security("Pairing code already used")` - Code was already verified
+- `OneClawError::Security("Pairing code expired")` - Code TTL expired
+
+## Identity Type
+
+Successful pairing returns an `Identity`:
+
+```rust
+pub struct Identity {
+    pub device_id: String,
+    pub paired_at: chrono::DateTime<chrono::Utc>,
+}
+```
+
+**Source:** `crates/oneclaw-core/src/security/traits.rs:42`
+
+- **device_id**: Unique UUID v4 identifier for the device
+- **paired_at**: Timestamp when pairing occurred
+
+## PairingManager Implementation
+
+The `PairingManager` handles code generation and verification.
+
+**Source:** `crates/oneclaw-core/src/security/pairing.rs:20`
+
+```rust
+pub struct PairingManager {
+    codes: Mutex<HashMap<String, (chrono::DateTime<chrono::Utc>, bool)>>,
+    code_ttl_seconds: i64,
+}
+```
+
+### Constructor
+
+```rust
+pub fn new(code_ttl_seconds: i64) -> Self
+```
+
+**Source:** `crates/oneclaw-core/src/security/pairing.rs:28`
+
+**Parameters:**
+- `code_ttl_seconds` - How long codes remain valid (seconds)
+
+**Common TTL values:**
+- Production: 300 seconds (5 minutes)
+- Development: 3600 seconds (1 hour)
+
+### Code Generation Algorithm
+
+```rust
+fn generate_code() -> Result<String> {
+    use ring::rand::{SecureRandom, SystemRandom};
+    let rng = SystemRandom::new();
+    let mut bytes = [0u8; 4];
+    rng.fill(&mut bytes)
+        .map_err(|_| OneClawError::Security("RNG failed".into()))?;
+    let num = u32::from_be_bytes(bytes) % 1_000_000;
+    Ok(format!("{:06}", num))
+}
+```
+
+**Source:** `crates/oneclaw-core/src/security/pairing.rs:8`
+
+- Uses `ring` crate's `SystemRandom` for cryptographic randomness
+- Generates uniform distribution over 000000-999999
+- Zero-padded to ensure 6 digits
+
+### Verification Process
+
+The `verify()` method atomically checks and consumes codes:
+
+```rust
+pub fn verify(&self, code: &str) -> Result<Identity> {
+    let mut codes = self.codes.lock()
+        .map_err(|_| OneClawError::Security("Lock poisoned".into()))?;
+
+    match codes.get_mut(code) {
+        None => Err(OneClawError::Security("Invalid pairing code".into())),
+        Some((created, used)) => {
+            if *used {
+                return Err(OneClawError::Security("Pairing code already used".into()));
+            }
+            let now = chrono::Utc::now();
+            if (now - *created).num_seconds() >= self.code_ttl_seconds {
+                codes.remove(code);
+                return Err(OneClawError::Security("Pairing code expired".into()));
+            }
+            *used = true;
+            Ok(Identity {
+                device_id: uuid::Uuid::new_v4().to_string(),
+                paired_at: now,
+            })
+        }
+    }
+}
+```
+
+**Source:** `crates/oneclaw-core/src/security/pairing.rs:53`
+
+**Validation steps:**
+1. Acquire lock on code registry
+2. Check if code exists
+3. Check if code was already used
+4. Check if code expired (TTL)
+5. Mark code as used
+6. Generate new UUID v4 device ID
+7. Return Identity
+
+## Pairing State Management
+
+### In-Memory Cache
+
+Paired devices are stored in memory:
+
+```rust
+paired_devices: Mutex<HashSet<String>>
+```
+
+**Source:** `crates/oneclaw-core/src/security/default.rs:23`
+
+### Persistent Storage
+
+Devices can be persisted to SQLite:
+
+```rust
+persistence: Option<SqliteSecurityStore>
+```
+
+**Source:** `crates/oneclaw-core/src/security/default.rs:29`
+
+### Atomic Grant Flow
+
+The `verify_and_grant()` method ensures atomicity:
+
+```rust
+fn verify_and_grant(&self, code: &str) -> Result<Identity> {
+    // Step 1: Atomic verify (marks code as used)
+    let identity = self.pairing.verify(code)?;
+
+    // Step 2: Grant access (with poison recovery)
+    {
+        let mut devices = self.paired_devices.lock()
+            .unwrap_or_else(|e| e.into_inner());
+        devices.insert(identity.device_id.clone());
+    }
+
+    // Step 3: Persist to SQLite if configured
+    if let Some(ref store) = self.persistence {
+        let device = PairedDevice::from_identity(&identity);
+        if let Err(e) = store.store_device(&device) {
+            tracing::warn!("Failed to persist device to SQLite: {}", e);
+        }
+    }
+
+    // Step 3b: Legacy flat-file persistence
+    self.persist_registry();
+
+    Ok(identity)
+}
+```
+
+**Source:** `crates/oneclaw-core/src/security/default.rs:120`
+
+**Guarantees:**
+- Code is marked used **before** granting access
+- Lock poison recovery prevents grant failure
+- Persistence failure doesn't block pairing
+
+## Usage Examples
+
+### Basic Pairing Flow
+
+```rust
+use oneclaw_core::security::{DefaultSecurity, SecurityCore};
+
+let security = DefaultSecurity::production("/workspace");
+
+// Server: Generate pairing code
+let code = security.generate_pairing_code()?;
+println!("Pairing code: {}", code); // e.g., "042815"
+
+// Device: Submit code for verification
+let identity = security.verify_pairing_code(&code)?;
+println!("Paired device: {}", identity.device_id);
+println!("Paired at: {}", identity.paired_at);
+
+// Device can now perform actions
+use oneclaw_core::security::{Action, ActionKind};
+let action = Action {
+    kind: ActionKind::Read,
+    resource: "/workspace/data.json".into(),
+    actor: identity.device_id.clone(),
+};
+let permit = security.authorize(&action)?;
+assert!(permit.granted);
+```
+
+### Handling Invalid Codes
+
+```rust
+use oneclaw_core::security::{DefaultSecurity, SecurityCore};
+
+let security = DefaultSecurity::production("/workspace");
+
+// Wrong code
+let result = security.verify_pairing_code("999999");
+assert!(result.is_err());
+assert_eq!(
+    result.unwrap_err().to_string(),
+    "Security error: Invalid pairing code"
+);
+```
+
+### Code Expiry
+
+```rust
+use oneclaw_core::security::{DefaultSecurity, SecurityCore};
+
+let security = DefaultSecurity::new(
+    "/workspace",
+    true,  // workspace_only
+    true,  // pairing_required
+    5      // 5 second TTL
+);
+
+// Generate code
+let code = security.generate_pairing_code()?;
+
+// Wait for expiry
+std::thread::sleep(std::time::Duration::from_secs(6));
+
+// Code expired
+let result = security.verify_pairing_code(&code);
+assert!(result.is_err());
+assert!(result.unwrap_err().to_string().contains("expired"));
+```
+
+### One-Time Use Enforcement
+
+```rust
+use oneclaw_core::security::{DefaultSecurity, SecurityCore};
+
+let security = DefaultSecurity::production("/workspace");
+
+// Generate and verify code
+let code = security.generate_pairing_code()?;
+let identity1 = security.verify_pairing_code(&code)?;
+
+// Second verification fails (code already used)
+let result = security.verify_pairing_code(&code);
+assert!(result.is_err());
+assert!(result.unwrap_err().to_string().contains("already used"));
+```
+
+### With SQLite Persistence
+
+```rust
+use oneclaw_core::security::{DefaultSecurity, SecurityCore, SqliteSecurityStore};
+
+// Create persistent store
+let store = SqliteSecurityStore::new("/var/oneclaw/security.db")?;
+let security = DefaultSecurity::production("/workspace")
+    .with_persistence(store);
+
+// Pair device (persisted to SQLite)
+let code = security.generate_pairing_code()?;
+let identity = security.verify_pairing_code(&code)?;
+
+// Device survives restart
+let store2 = SqliteSecurityStore::new("/var/oneclaw/security.db")?;
+let security2 = DefaultSecurity::production("/workspace")
+    .with_persistence(store2);
+
+// Device still paired
+let action = Action {
+    kind: ActionKind::Read,
+    resource: "/workspace/file.txt".into(),
+    actor: identity.device_id,
+};
+let permit = security2.authorize(&action)?;
+assert!(permit.granted);
+```
+
+### Listing Paired Devices
+
+```rust
+use oneclaw_core::security::{DefaultSecurity, SecurityCore};
+
+let security = DefaultSecurity::production("/workspace");
+
+// Pair two devices
+let code1 = security.generate_pairing_code()?;
+let identity1 = security.verify_pairing_code(&code1)?;
+
+let code2 = security.generate_pairing_code()?;
+let identity2 = security.verify_pairing_code(&code2)?;
+
+// List all paired devices
+let devices = security.list_devices()?;
+assert_eq!(devices.len(), 2);
+for device in devices {
+    println!("{}: paired at {}", device.device_id, device.paired_at);
+}
+```
+
+### Removing Paired Devices
+
+```rust
+use oneclaw_core::security::{DefaultSecurity, SecurityCore};
+
+let security = DefaultSecurity::production("/workspace");
+
+// Pair device
+let code = security.generate_pairing_code()?;
+let identity = security.verify_pairing_code(&code)?;
+
+// Remove by prefix
+let removed = security.remove_device(&identity.device_id[..8])?;
+assert_eq!(removed.device_id, identity.device_id);
+
+// Device no longer authorized
+let action = Action {
+    kind: ActionKind::Read,
+    resource: "/workspace/file.txt".into(),
+    actor: identity.device_id,
+};
+let permit = security.authorize(&action)?;
+assert!(!permit.granted);
+```
+
+## Security Considerations
+
+### Cryptographic Randomness
+
+- Uses `ring::rand::SystemRandom` for cryptographic-quality randomness
+- 6 digits = 1,000,000 possible codes
+- Combined with TTL expiry prevents brute-force attacks
+
+### TTL Expiry
+
+- Codes expire after configured TTL
+- Expired codes are automatically cleaned from registry
+- Reduces attack window for code interception
+
+### One-Time Use
+
+- Each code can only be verified once
+- Prevents replay attacks
+- Code is marked used atomically during verification
+
+### Poison Recovery
+
+- Lock poisoning doesn't prevent device pairing
+- Uses `unwrap_or_else(|e| e.into_inner())` to recover
+- Ensures pairing succeeds after code is consumed
+
+## Configuration
+
+### Production Settings
+
+```rust
+DefaultSecurity::production("/workspace")
+// - workspace_only: true
+// - pairing_required: true
+// - code_ttl_seconds: 300 (5 minutes)
+```
+
+### Development Settings
+
+```rust
+DefaultSecurity::development("/workspace")
+// - workspace_only: true
+// - pairing_required: false
+// - code_ttl_seconds: 3600 (1 hour)
+```
+
+### Custom Settings
+
+```rust
+DefaultSecurity::new(
+    "/workspace",
+    true,   // workspace_only
+    true,   // pairing_required
+    600     // 10 minute TTL
+)
+```
+
+## Best Practices
+
+1. **Use short TTL in production** - 5 minutes is recommended
+2. **Display codes securely** - Show on trusted display, not in logs
+3. **Enable persistence** - Use SQLite to survive restarts
+4. **Handle errors gracefully** - Invalid codes should not crash
+5. **Audit pairing events** - Log all pairing attempts
+6. **Rotate codes frequently** - Generate new code if not used quickly
+
+## See Also
+
+- [SecurityCore Trait](/api/security/traits) - Trait definition and implementations
+- [Authorization API](/api/security/authorization) - Using paired devices for authorization

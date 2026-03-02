@@ -1,0 +1,241 @@
+---
+title: Provider Traits
+description: Core Provider and EmbeddingProvider trait definitions for OneClaw's multi-provider architecture
+---
+
+## Provider Trait
+
+The `Provider` trait is the unified interface for all LLM backends in OneClaw. All 6 providers (Anthropic, OpenAI, DeepSeek, Groq, Gemini, Ollama) implement this trait.
+
+### Trait Definition
+
+```rust
+pub trait Provider: Send + Sync {
+    fn id(&self) -> &'static str;
+    fn display_name(&self) -> &str;
+    fn is_available(&self) -> bool;
+    fn chat(&self, system: &str, user_message: &str) -> Result<ProviderResponse>;
+    fn chat_with_history(&self, system: &str, messages: &[ChatMessage]) -> Result<ProviderResponse>;
+}
+```
+
+### Methods
+
+#### `id() -> &'static str`
+Returns the provider identifier: `"anthropic"`, `"openai"`, `"deepseek"`, `"groq"`, `"google"`, or `"ollama"`.
+
+#### `display_name() -> &str`
+Human-readable name for display: `"Anthropic Claude"`, `"OpenAI GPT"`, `"Google Gemini"`, etc.
+
+#### `is_available() -> bool`
+Check if the provider is ready to serve requests:
+- Cloud providers (Anthropic, OpenAI, etc.): Returns `true` if API key is configured
+- Local providers (Ollama): Performs actual health check with 5s timeout
+
+#### `chat(system, user_message) -> Result<ProviderResponse>`
+Send a single message with system prompt. Used for simple queries, alert generation, classification.
+
+**Parameters:**
+- `system`: System instruction (empty string if none)
+- `user_message`: User's message text
+
+**Returns:** `Result<ProviderResponse>` containing generated text, provider ID, and token usage.
+
+#### `chat_with_history(system, messages) -> Result<ProviderResponse>`
+Send a conversation with history. Used for multi-turn conversations and context-aware responses.
+
+**Parameters:**
+- `system`: System instruction (empty string if none)
+- `messages`: Array of `ChatMessage` with conversation history
+
+**Returns:** `Result<ProviderResponse>` with generated response.
+
+---
+
+## Supporting Types
+
+### ChatMessage
+
+Represents a message in a conversation:
+
+```rust
+pub struct ChatMessage {
+    pub role: MessageRole,
+    pub content: String,
+}
+```
+
+### MessageRole
+
+Role of a participant in a conversation:
+
+```rust
+pub enum MessageRole {
+    System,     // System-level instruction
+    User,       // User message
+    Assistant,  // Assistant response
+}
+```
+
+### ProviderResponse
+
+Response from an LLM provider:
+
+```rust
+pub struct ProviderResponse {
+    pub content: String,              // Generated text
+    pub provider_id: &'static str,    // Which provider served the response
+    pub usage: Option<TokenUsage>,    // Token usage (if available)
+}
+```
+
+### TokenUsage
+
+Token usage statistics:
+
+```rust
+pub struct TokenUsage {
+    pub prompt_tokens: u32,      // Tokens in the prompt
+    pub completion_tokens: u32,  // Tokens in the completion
+    pub total_tokens: u32,       // Total tokens used
+}
+```
+
+### ProviderConfig
+
+Configuration for a provider instance:
+
+```rust
+pub struct ProviderConfig {
+    pub provider_id: String,          // "anthropic", "openai", etc.
+    pub endpoint: Option<String>,     // Custom endpoint (None = default)
+    pub api_key: Option<String>,      // API key (None for Ollama)
+    pub model: String,                // Model name
+    pub max_tokens: u32,              // Max tokens for response
+    pub temperature: f32,             // Temperature (0.0 - 1.0)
+}
+```
+
+---
+
+## EmbeddingProvider Trait
+
+The `EmbeddingProvider` trait is the interface for generating text embeddings for vector memory.
+
+### Trait Definition
+
+```rust
+pub trait EmbeddingProvider: Send + Sync {
+    fn id(&self) -> &str;
+    fn model_name(&self) -> &str;
+    fn model_id(&self) -> String;
+    fn embed(&self, text: &str) -> Result<Embedding>;
+    fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Embedding>>;
+    fn dimensions(&self) -> usize;
+    fn is_available(&self) -> bool;
+}
+```
+
+### Methods
+
+#### `id() -> &str`
+Provider identifier: `"ollama"` or `"openai"`.
+
+#### `model_name() -> &str`
+Model name: `"nomic-embed-text"`, `"text-embedding-3-small"`, etc.
+
+#### `model_id() -> String`
+Full model identifier for storage: `"ollama:nomic-embed-text"`, `"openai:text-embedding-3-small"`.
+
+#### `embed(text) -> Result<Embedding>`
+Generate embedding for a single text.
+
+**Parameters:**
+- `text`: Text to embed
+
+**Returns:** `Result<Embedding>` containing the vector representation.
+
+#### `embed_batch(texts) -> Result<Vec<Embedding>>`
+Generate embeddings for multiple texts in one request (batch operation).
+
+**Parameters:**
+- `texts`: Array of text strings to embed
+
+**Returns:** `Result<Vec<Embedding>>` with embeddings in same order as input.
+
+**Note:** Default implementation calls `embed()` in a loop. Providers with native batch support can override.
+
+#### `dimensions() -> usize`
+Expected embedding dimensions for the configured model:
+- `nomic-embed-text`: 768
+- `text-embedding-3-small`: 1536
+- `text-embedding-3-large`: 3072
+
+#### `is_available() -> bool`
+Check if the embedding provider is reachable:
+- Ollama: Checks `GET /api/tags` endpoint
+- OpenAI: Checks if API key is configured
+
+---
+
+## Design Principles
+
+### Sync-Friendly
+All methods are synchronous (return `Result`, not `Stream`). Designed for edge/IoT simplicity. Future v2.0 may add streaming.
+
+### Simple
+Only 2 chat methods: single message + history. No complex abstractions.
+
+### No Lock-In
+OpenAI-compatible API format as common denominator. Easy to swap providers via config.
+
+### Object-Safe
+All traits are object-safe, allowing `Box<dyn Provider>` and `Box<dyn EmbeddingProvider>` for dynamic dispatch.
+
+---
+
+## Example Usage
+
+### Using Provider Trait
+
+```rust
+use oneclaw_core::provider::{Provider, ChatMessage, MessageRole};
+
+// Any provider can be used as Box<dyn Provider>
+let provider: Box<dyn Provider> = Box::new(anthropic_provider);
+
+// Simple chat
+let response = provider.chat(
+    "You are a helpful assistant.",
+    "What is the capital of France?"
+)?;
+
+println!("Response: {}", response.content);
+println!("Provider: {}", response.provider_id);
+
+// Chat with history
+let messages = vec![
+    ChatMessage { role: MessageRole::User, content: "Hello".into() },
+    ChatMessage { role: MessageRole::Assistant, content: "Hi there!".into() },
+    ChatMessage { role: MessageRole::User, content: "How are you?".into() },
+];
+
+let response = provider.chat_with_history("Be friendly", &messages)?;
+```
+
+### Using EmbeddingProvider Trait
+
+```rust
+use oneclaw_core::provider::EmbeddingProvider;
+
+let provider: Box<dyn EmbeddingProvider> = Box::new(ollama_embedding);
+
+// Single embedding
+let embedding = provider.embed("Hello, world!")?;
+assert_eq!(embedding.dim(), 768);
+
+// Batch embeddings
+let texts = &["hello", "world", "test"];
+let embeddings = provider.embed_batch(texts)?;
+assert_eq!(embeddings.len(), 3);
+```

@@ -1,0 +1,223 @@
+---
+title: Architecture Overview
+description: Understanding OneClaw's 6-layer trait-driven architecture and design principles
+---
+
+## Overview
+
+OneClaw is a **6-layer trait-driven AI agent kernel** built in Rust. Each layer is defined as a trait with both default and noop implementations, making the system modular, testable, and domain-agnostic.
+
+## The 6-Layer Architecture
+
+```
+┌─────────────────────────────────────────────────────────┐
+│              OneClaw Core Architecture                   │
+├─────────────────────────────────────────────────────────┤
+│  L5: Channel (Ears & Mouth)                              │
+│  └─ CLI | TCP | Telegram | MQTT | Custom                │
+├─────────────────────────────────────────────────────────┤
+│  L4: Tool (Hands)                                        │
+│  └─ Sandboxed execution | Security gating               │
+├─────────────────────────────────────────────────────────┤
+│  L3: Event Bus (Nervous System)                          │
+│  └─ Pub/Sub | Pipeline Engine | Sync/Async              │
+├─────────────────────────────────────────────────────────┤
+│  L2: Memory (Brain)                                      │
+│  └─ SQLite FTS5 + Vector Search + Temporal              │
+├─────────────────────────────────────────────────────────┤
+│  L1: Orchestrator (Heart) — MOAT                         │
+│  └─ Smart Routing | Chain Execution | Context Mgr       │
+├─────────────────────────────────────────────────────────┤
+│  L0: Security (Immune System)                            │
+│  └─ Deny-by-default | Pairing | Rate Limiting           │
+└─────────────────────────────────────────────────────────┘
+  Runtime: Rust 2024 native binary | under 5MB RAM | sub-10ms boot
+```
+
+## Layer Interactions
+
+### Message Flow
+
+When a message arrives through a channel:
+
+1. **L5 (Channel)** receives the message from external source
+2. **L0 (Security)** authorizes the action based on device pairing and action type
+3. **L1 (Orchestrator)** analyzes complexity and routes to appropriate LLM
+4. **L2 (Memory)** provides context via hybrid search (FTS5 + vector)
+5. **L3 (Event Bus)** processes any events generated during execution
+6. **L4 (Tool)** executes any tools requested by the LLM
+7. Response flows back through **L5 (Channel)** to the user
+
+### Runtime Integration
+
+The `Runtime` struct (defined in `runtime.rs`) orchestrates all layers:
+
+```rust
+pub struct Runtime {
+    pub config: OneClawConfig,
+    pub security: Box<dyn SecurityCore>,        // L0
+    pub router: Box<dyn ModelRouter>,           // L1
+    pub context_mgr: Box<dyn ContextManager>,   // L1
+    pub chain: Box<dyn ChainExecutor>,          // L1
+    pub memory: Box<dyn Memory>,                // L2
+    pub event_bus: Box<dyn EventBus>,           // L3
+    pub tool_registry: Arc<ToolRegistry>,       // L4
+    // L5 channels passed to run() method
+}
+```
+
+See `runtime.rs:29` for the complete definition.
+
+## Design Principles
+
+### 1. Trait-Driven Architecture
+
+Every layer is defined as a trait, allowing:
+- **Modularity**: Swap implementations without changing other layers
+- **Testability**: Use noop implementations for unit testing
+- **Extensibility**: Custom implementations for domain-specific needs
+
+Example from `security/traits.rs:75`:
+
+```rust
+pub trait SecurityCore: Send + Sync {
+    fn authorize(&self, action: &Action) -> Result<Permit>;
+    fn check_path(&self, path: &std::path::Path) -> Result<()>;
+    fn generate_pairing_code(&self) -> Result<String>;
+    fn verify_pairing_code(&self, code: &str) -> Result<Identity>;
+}
+```
+
+### 2. Deny-by-Default Security
+
+Security is not an afterthought—it's **Layer 0**. All actions require explicit authorization:
+
+- Unpaired devices are blocked
+- Filesystem access is scoped to workspace
+- Per-command authorization checks
+- Rate limiting prevents DoS attacks
+
+See `runtime.rs:263` for authorization implementation.
+
+### 3. Graceful Degradation
+
+The system continues operating even when components fail:
+
+- **No LLM provider?** Falls back to offline mode with memory search
+- **No vector embeddings?** Uses FTS5 keyword search
+- **Event bus full?** Continues processing with degraded event handling
+
+Example from `runtime.rs:233`:
+
+```rust
+fn offline_response(&self, content: &str) -> String {
+    let memory_results = self.search_memory_context(content);
+    let mut response = "[Offline mode] No LLM provider configured.".to_string();
+    if !memory_results.is_empty() {
+        response.push_str(&format!("\n{} related entries found in memory.", memory_results.len()));
+    }
+    response
+}
+```
+
+### 4. Domain-Agnostic Core
+
+The core kernel knows nothing about specific domains (elderly care, smart home, etc.). Domain logic lives in separate crates that compose the core traits.
+
+**Core crate structure** (from `ONECLAW-BLUEPRINT.md:149`):
+
+```
+crates/
+├── oneclaw-core/       # The kernel (domain-agnostic)
+├── oneclaw-tools/      # Built-in tools
+├── oneclaw-channels/   # Channel implementations
+└── oneclaw-elderly/    # Domain-specific vertical (example)
+```
+
+### 5. Edge-Viable Performance
+
+<CardGroup cols={3}>
+  <Card title="Binary Size" icon="cube">
+    ~3.4MB (target: under 5MB)
+  </Card>
+  <Card title="Boot Time" icon="bolt">
+    0.79µs (target: sub-10ms)
+  </Card>
+  <Card title="Memory Footprint" icon="memory">
+    Under 5MB RAM typical
+  </Card>
+</CardGroup>
+
+From `README.md:7`:
+
+| Metric | Target | Actual |
+|--------|--------|--------|
+| Boot time | `<10ms` | 0.79µs |
+| Binary size | `<5MB` | ~3.4MB |
+| Message throughput | `>1K/sec` | 3.8M/sec |
+| Event processing | `>5K/sec` | 443K/sec |
+
+### 6. LLM Orchestration (Competitive Moat)
+
+Unlike other edge AI frameworks, OneClaw treats LLMs as a **team of specialists** requiring coordination:
+
+- **Smart Routing**: Complexity analysis routes to appropriate model (from `orchestrator/router.rs:120`)
+- **Chain Execution**: Multi-step reasoning with context passing
+- **Context Management**: Memory retrieval and prompt enrichment
+- **Fallback Chains**: Automatic provider failover
+
+See the [Layers](/concepts/layers) page for detailed orchestrator explanation.
+
+## Configuration-Driven Assembly
+
+Rather than hardcoding layer implementations, OneClaw uses a **Registry** pattern to resolve traits from configuration.
+
+From `runtime.rs:112`:
+
+```rust
+pub fn from_config(config: OneClawConfig, workspace: impl Into<PathBuf>) -> Result<Self> {
+    use crate::registry::Registry;
+    let traits = Registry::resolve(&config, workspace)?;
+    Ok(Self {
+        config,
+        security: traits.security,
+        router: traits.router,
+        context_mgr: traits.context_mgr,
+        chain: traits.chain,
+        memory: traits.memory,
+        event_bus: traits.event_bus,
+        // ...
+    })
+}
+```
+
+This allows switching implementations via TOML without recompilation:
+
+```toml config/default.toml
+[security]
+deny_by_default = true
+
+[memory]
+backend = "sqlite"  # or "noop" for testing
+
+[provider]
+primary = "anthropic"
+fallback = ["ollama"]
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Layer Details" icon="layer-group" href="/concepts/layers">
+    Deep dive into each of the 6 layers
+  </Card>
+  <Card title="Trait Philosophy" icon="puzzle-piece" href="/concepts/traits">
+    Understanding trait-driven design
+  </Card>
+  <Card title="Security Model" icon="shield" href="/concepts/security">
+    Deny-by-default security architecture
+  </Card>
+  <Card title="Quick Start" icon="rocket" href="/getting-started">
+    Build and run OneClaw
+  </Card>
+</CardGroup>

@@ -1,0 +1,135 @@
+---
+title: Edge Device Deployment
+description: Deploy OneClaw on resource-constrained edge devices for AI-powered IoT applications
+---
+
+OneClaw is designed from the ground up for edge deployment, providing a lightweight AI agent runtime that runs efficiently on resource-constrained devices.
+
+## Supported Edge Platforms
+
+OneClaw runs on a wide variety of edge devices:
+
+- **Raspberry Pi** 3, 4, 5, Zero (see [Raspberry Pi deployment](/deployment/raspberry-pi))
+- **Orange Pi** and other ARM development boards
+- **NanoPi** series
+- Industrial IoT gateways
+- Smart home hubs
+- Agricultural sensor networks
+- Healthcare monitoring devices
+
+## Hardware Requirements
+
+### Minimum Requirements
+
+| Resource | Requirement |
+|----------|-------------|
+| **CPU** | ARM Cortex-A53 or equivalent (1 core minimum) |
+| **RAM** | 128 MB available (service limit enforced) |
+| **Storage** | 50 MB for binary + database |
+| **OS** | Linux kernel 4.9+ with systemd |
+
+### Recommended Specifications
+
+| Resource | Recommendation |
+|----------|----------------|
+| **CPU** | ARM Cortex-A72 or better (2+ cores) |
+| **RAM** | 512 MB - 1 GB |
+| **Storage** | 200 MB+ for logs and memory growth |
+
+## Target Architectures
+
+OneClaw provides pre-built binaries and cross-compilation support for multiple architectures:
+
+### ARM64 (aarch64-unknown-linux-gnu)
+
+- **Devices**: Raspberry Pi 4/5 (64-bit), Orange Pi, NanoPi M4
+- **Binary Size**: ~3.4 MB
+- **Performance**: Full feature set with optimal performance
+- **Status**: Primary target, fully tested
+
+### ARMv7 (armv7-unknown-linux-gnueabihf)
+
+- **Devices**: Raspberry Pi 3/Zero (32-bit), older ARM boards
+- **Binary Size**: ~3.5 MB
+- **Performance**: Excellent for legacy hardware
+- **Status**: Fully supported
+
+### x86_64 (x86_64-unknown-linux-gnu)
+
+- **Devices**: Intel NUC, edge gateways, mini PCs
+- **Binary Size**: ~3.4 MB
+- **Performance**: Highest performance option
+- **Status**: Fully supported
+
+### RISC-V (future)
+
+- **Status**: Planned support for RISC-V edge devices
+- **Target**: riscv64gc-unknown-linux-gnu
+
+## Performance Characteristics
+
+OneClaw is optimized for edge constraints:
+
+### Boot Time
+
+- **Target**: < 10ms
+- **Actual**: 0.79 microseconds (kernel initialization)
+- **Real-world**: < 1 second including systemd startup
+
+### Binary Size
+
+- **Target**: < 5 MB
+- **Actual**: ~3.4 MB (stripped release binary)
+- **Dependencies**: Zero runtime dependencies (statically linked SQLite and Rust TLS)
+
+### Message Throughput
+
+- **Target**: > 1,000 messages/second
+- **Actual**: 3.8 million messages/second
+- **Use Case**: Handles high-frequency sensor data streams
+
+### Event Processing
+
+- **Target**: > 5,000 events/second
+- **Actual**: 443,000 events/second
+- **Use Case**: Real-time event bus for IoT automation
+
+### Memory Search
+
+- **Target**: < 5ms per query
+- **Actual**: 11.9 microseconds (hybrid FTS5 + vector search)
+- **Use Case**: Fast semantic recall from agent memory
+
+### Resource Limits
+
+The systemd service enforces edge-friendly limits:
+
+```toml
+MemoryMax=128M      # Maximum 128 MB RAM
+CPUQuota=50%        # Maximum 50% of one CPU core
+```
+
+These limits ensure OneClaw remains a good neighbor on shared edge devices.
+
+## Zero-Dependency Design
+
+OneClaw has **no runtime dependencies**:
+
+- **SQLite**: Bundled via rusqlite (compiled from C source)
+- **TLS**: Pure Rust implementation via rustls-tls
+- **Async Runtime**: Built-in Tokio (no system libc async required)
+- **No OpenSSL**: Avoids cross-compilation challenges
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Raspberry Pi Setup" icon="raspberry-pi" href="/deployment/raspberry-pi">
+    Step-by-step installation on Raspberry Pi devices
+  </Card>
+  <Card title="Cross-Compilation" icon="hammer" href="/deployment/cross-compile">
+    Build ARM binaries from your development machine
+  </Card>
+  <Card title="systemd Service" icon="server" href="/deployment/systemd">
+    Configure OneClaw as a system service
+  </Card>
+</CardGroup>

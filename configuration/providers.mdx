@@ -1,0 +1,315 @@
+---
+title: LLM Provider Configuration
+description: Configure LLM providers, models, and fallback chains
+---
+
+OneClaw supports 6 LLM providers with automatic fallback chains. All providers use a unified `[provider]` configuration section.
+
+## Supported Providers
+
+| Provider | ID | Default Model | API Key Env Var |
+|----------|----|--------------|-----------------|
+| Anthropic Claude | `anthropic` | `claude-sonnet-4-20250514` | `ANTHROPIC_API_KEY` |
+| OpenAI GPT | `openai` | `gpt-4o` | `OPENAI_API_KEY` |
+| DeepSeek | `deepseek` | `deepseek-chat` | `DEEPSEEK_API_KEY` |
+| Groq | `groq` | `llama-3.3-70b-versatile` | `GROQ_API_KEY` |
+| Google Gemini | `google` or `gemini` | `gemini-2.0-flash` | `GOOGLE_API_KEY` |
+| Ollama (local) | `ollama` | `llama3.2:1b` | *(none)* |
+
+## Basic Configuration
+
+Minimal provider configuration:
+
+```toml
+[provider]
+primary = "anthropic"
+model = "claude-sonnet-4-20250514"
+```
+
+API key via environment variable:
+
+```bash
+export ANTHROPIC_API_KEY="sk-ant-..."
+```
+
+## Provider Selection
+
+Set the `primary` field to choose your LLM provider:
+
+```toml
+[provider]
+primary = "openai"          # OpenAI GPT-4o
+model = "gpt-4o-mini"       # Override default model
+max_tokens = 2048
+temperature = 0.5
+```
+
+```toml
+[provider]
+primary = "deepseek"        # DeepSeek (cost-effective)
+model = "deepseek-chat"
+max_tokens = 4096
+temperature = 0.3
+```
+
+```toml
+[provider]
+primary = "groq"            # Groq (fast inference)
+model = "llama-3.3-70b-versatile"
+max_tokens = 8192
+temperature = 0.7
+```
+
+```toml
+[provider]
+primary = "google"          # Google Gemini
+model = "gemini-2.0-flash"
+max_tokens = 1024
+temperature = 0.4
+```
+
+```toml
+[provider]
+primary = "ollama"          # Local Ollama (no API key needed)
+model = "llama3.2:3b"
+max_tokens = 2048
+temperature = 0.6
+```
+
+## Model Configuration
+
+### Available Models by Provider
+
+**Anthropic Claude:**
+- `claude-sonnet-4-20250514` — Best balance (default)
+- `claude-haiku-4-5-20251001` — Fast, cheap, good for classification
+- `claude-opus-4-5-20250918` — Max quality, expensive
+
+**OpenAI GPT:**
+- `gpt-4o` — Latest GPT-4 (default)
+- `gpt-4o-mini` — Faster, cheaper
+
+**DeepSeek:**
+- `deepseek-chat` — General purpose (default)
+- `deepseek-reasoner` — Advanced reasoning
+
+**Groq:**
+- `llama-3.3-70b-versatile` — Llama 3.3 70B (default)
+- `mixtral-8x7b-32768` — Mixtral MoE
+
+**Google Gemini:**
+- `gemini-2.0-flash` — Fast, efficient (default)
+
+**Ollama:**
+- `llama3.2:1b` — Smallest, fastest (default)
+- `llama3.2:3b` — Better quality
+- `qwen2.5:3b` — Good multilingual support
+- *(Any Ollama-supported model)*
+
+### Model Parameters
+
+```toml
+[provider]
+primary = "anthropic"
+model = "claude-sonnet-4-20250514"
+max_tokens = 1024          # Maximum response length
+temperature = 0.3          # 0.0 (deterministic) to 1.0 (creative)
+```
+
+- **`max_tokens`**: Controls response length (default: 1024)
+- **`temperature`**: Controls randomness (default: 0.3)
+  - `0.0` — Deterministic, consistent
+  - `0.3-0.5` — Balanced (recommended for agents)
+  - `0.7-1.0` — Creative, varied
+
+## Fallback Chains
+
+OneClaw supports automatic failover to backup providers:
+
+```toml
+[provider]
+primary = "anthropic"
+model = "claude-sonnet-4-20250514"
+fallback = ["openai", "ollama"]  # Try in order if primary fails
+max_retries = 2                   # Retry each provider N times
+```
+
+### How Fallback Works
+
+1. Try **primary** provider (with `max_retries` attempts)
+2. If primary fails, try **fallback[0]** (with `max_retries`)
+3. If fallback[0] fails, try **fallback[1]**, etc.
+4. If all providers fail, return error
+
+### Example: Cloud with Local Fallback
+
+```toml
+[provider]
+primary = "anthropic"              # Cloud primary
+model = "claude-sonnet-4-20250514"
+fallback = ["ollama"]              # Local fallback if network fails
+max_retries = 1
+
+[provider.keys]
+anthropic = "sk-ant-..."
+```
+
+Ollama runs locally on `http://localhost:11434` (no API key needed).
+
+### Example: Multi-Cloud Fallback
+
+```toml
+[provider]
+primary = "anthropic"              # Primary: Claude
+model = "claude-sonnet-4-20250514"
+fallback = ["openai", "deepseek"] # Fallback chain
+max_retries = 2                    # 2 retries per provider
+
+[provider.keys]
+anthropic = "sk-ant-..."
+openai = "sk-..."
+deepseek = "sk-..."
+```
+
+## API Key Configuration
+
+### Option 1: Per-Provider Keys (Recommended)
+
+Use the `[provider.keys]` table for multiple providers:
+
+```toml
+[provider]
+primary = "anthropic"
+model = "claude-sonnet-4-20250514"
+fallback = ["openai", "ollama"]
+
+[provider.keys]
+anthropic = "sk-ant-api03-..."
+openai = "sk-proj-..."
+# google = "AIza..."
+```
+
+### Option 2: Global API Key
+
+Use `api_key` for single-provider setups:
+
+```toml
+[provider]
+primary = "anthropic"
+model = "claude-sonnet-4-20250514"
+api_key = "sk-ant-api03-..."
+```
+
+### Option 3: Environment Variables
+
+Set provider-specific env vars:
+
+```bash
+export ANTHROPIC_API_KEY="sk-ant-..."
+export OPENAI_API_KEY="sk-proj-..."
+export DEEPSEEK_API_KEY="sk-..."
+export GROQ_API_KEY="gsk-..."
+export GOOGLE_API_KEY="AIza..."
+```
+
+Or use the global fallback:
+
+```bash
+export ONECLAW_API_KEY="sk-ant-..."  # Used if no provider-specific key
+```
+
+### Key Resolution Priority
+
+1. `[provider.keys].<provider>` in TOML
+2. `api_key` field in `[provider]` section
+3. `ONECLAW_API_KEY` environment variable
+4. Provider-specific env var (e.g., `ANTHROPIC_API_KEY`)
+
+## Ollama Configuration
+
+Ollama runs locally and requires no API key:
+
+```toml
+[provider]
+primary = "ollama"
+model = "llama3.2:3b"
+max_tokens = 2048
+temperature = 0.5
+```
+
+### Custom Ollama Endpoint
+
+For remote Ollama servers:
+
+```toml
+[provider]
+primary = "ollama"
+ollama_endpoint = "http://192.168.1.100:11434"
+ollama_model = "qwen2.5:3b"  # Override model for Ollama only
+```
+
+Note: `ollama_model` is separate from `model` to allow different models for primary vs. fallback.
+
+## Example Configurations
+
+### Edge Device (Raspberry Pi)
+
+```toml
+[provider]
+primary = "anthropic"
+model = "claude-haiku-4-5-20251001"  # Fast, cheap
+max_tokens = 512                     # Limit response size
+temperature = 0.2                    # Deterministic
+fallback = ["ollama"]                # Local fallback
+
+[provider.keys]
+anthropic = "sk-ant-..."
+```
+
+### Development / Testing
+
+```toml
+[provider]
+primary = "ollama"                   # Free, local
+model = "llama3.2:1b"                # Fast small model
+max_tokens = 1024
+temperature = 0.5
+```
+
+### Production Multi-Cloud
+
+```toml
+[provider]
+primary = "anthropic"
+model = "claude-sonnet-4-20250514"
+fallback = ["openai", "deepseek", "ollama"]
+max_retries = 2
+max_tokens = 2048
+temperature = 0.3
+
+[provider.keys]
+anthropic = "sk-ant-..."
+openai = "sk-proj-..."
+deepseek = "sk-..."
+```
+
+## Checking Provider Status
+
+Use the `providers` command to see active provider configuration:
+
+```bash
+providers
+```
+
+Output:
+
+```
+Provider Chain:
+  Primary:  anthropic/claude-sonnet-4-20250514 ✓
+  Fallback: openai/gpt-4o ✓
+  Fallback: ollama/llama3.2:3b ✓
+
+Retries: 2 per provider
+```
+
+The ✓ indicates the provider is available (API key configured).

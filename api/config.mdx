@@ -1,0 +1,344 @@
+---
+title: OneClawConfig
+description: Configuration API for loading and managing OneClaw agent settings
+---
+
+The `OneClawConfig` struct represents the top-level configuration for the OneClaw agent, loaded from a TOML file or using defaults.
+
+## Struct Definition
+
+```rust
+pub struct OneClawConfig {
+    pub security: SecurityConfig,
+    pub runtime: RuntimeConfig,
+    pub providers: ProvidersConfig,
+    pub memory: MemoryConfig,
+    pub channels: ChannelsConfig,
+    pub telegram: Option<TelegramConfig>,
+    pub mqtt: Option<MqttConfig>,
+    pub provider: ProviderConfigToml,
+}
+```
+
+## Configuration Sections
+
+### SecurityConfig
+
+Security layer configuration.
+
+<ParamField path="deny_by_default" type="bool" default="true">
+  Whether to deny all unauthorized requests by default
+</ParamField>
+
+<ParamField path="pairing_required" type="bool" default="true">
+  Whether device pairing is required before interaction
+</ParamField>
+
+<ParamField path="workspace_only" type="bool" default="true">
+  Whether to restrict operations to the workspace directory
+</ParamField>
+
+<ParamField path="persist_path" type="String" default="data/security.db">
+  Path to SQLite database for persistent device pairing
+</ParamField>
+
+<ParamField path="persist_pairing" type="bool" default="true">
+  Whether to persist pairing state to SQLite
+</ParamField>
+
+### RuntimeConfig
+
+Runtime configuration (agent name, logging).
+
+<ParamField path="name" type="String" default="oneclaw">
+  The agent instance name
+</ParamField>
+
+<ParamField path="log_level" type="String" default="">
+  The log level filter (e.g., "debug", "info", "warn", "error")
+</ParamField>
+
+### ProvidersConfig
+
+LLM provider configuration (legacy - use `provider` section for v1.5+).
+
+<ParamField path="default" type="String" default="noop">
+  Default provider: "ollama", "openai", "noop"
+</ParamField>
+
+<ParamField path="llm_timeout_secs" type="u64" default="30">
+  LLM call timeout threshold in seconds (monitoring, not cancellation)
+</ParamField>
+
+<ParamField path="ollama" type="OllamaConfig">
+  Ollama provider configuration (url, model)
+</ParamField>
+
+<ParamField path="openai" type="OpenAIConfig">
+  OpenAI provider configuration (api_key, model, base_url)
+</ParamField>
+
+### MemoryConfig
+
+Memory backend configuration.
+
+<ParamField path="backend" type="String" default="sqlite">
+  Backend type: "sqlite" or "noop"
+</ParamField>
+
+<ParamField path="db_path" type="String" default="data/oneclaw.db">
+  Path to SQLite database file for memory storage
+</ParamField>
+
+### ChannelsConfig
+
+Communication channels configuration.
+
+<ParamField path="active" type="Vec<String>" default='["cli"]'>
+  Active channels: ["cli"], ["cli", "mqtt"], ["cli", "telegram"], etc.
+</ParamField>
+
+### TelegramConfig (Optional)
+
+Telegram bot configuration.
+
+<ParamField path="bot_token" type="String" required>
+  Bot token from @BotFather
+</ParamField>
+
+<ParamField path="allowed_chat_ids" type="Vec<i64>" default="[]">
+  Allowed chat IDs (empty = allow all)
+</ParamField>
+
+<ParamField path="polling_timeout" type="u64" default="30">
+  Long-polling timeout in seconds
+</ParamField>
+
+### MqttConfig (Optional)
+
+MQTT broker configuration.
+
+<ParamField path="host" type="String" required>
+  Broker host (e.g., "localhost", "mqtt.example.com")
+</ParamField>
+
+<ParamField path="port" type="u16" default="1883">
+  Broker port
+</ParamField>
+
+<ParamField path="client_id" type="String" default="oneclaw-{pid}">
+  Client ID (unique per device)
+</ParamField>
+
+<ParamField path="subscribe_topics" type="Vec<String>" default="[]">
+  Topics to subscribe (e.g., ["sensors/#", "devices/+/data"])
+</ParamField>
+
+<ParamField path="publish_prefix" type="String" default="oneclaw/alerts">
+  Topic prefix for publishing responses/alerts
+</ParamField>
+
+<ParamField path="username" type="Option<String>" default="None">
+  Username (optional)
+</ParamField>
+
+<ParamField path="password" type="Option<String>" default="None">
+  Password (optional, masked in Debug output)
+</ParamField>
+
+<ParamField path="keep_alive_secs" type="u64" default="30">
+  Keep-alive interval in seconds
+</ParamField>
+
+### ProviderConfigToml
+
+v1.5 multi-provider configuration with FallbackChain support.
+
+<ParamField path="primary" type="String" default="anthropic">
+  Primary provider ID: "anthropic", "openai", "google", "deepseek", "groq", "ollama"
+</ParamField>
+
+<ParamField path="model" type="String" default="claude-sonnet-4-20250514">
+  Model name (e.g., "claude-sonnet-4-20250514", "gpt-4o", "gemini-2.0-flash")
+</ParamField>
+
+<ParamField path="max_tokens" type="u32" default="1024">
+  Max tokens for response
+</ParamField>
+
+<ParamField path="temperature" type="f32" default="0.3">
+  Temperature (0.0 - 1.0) for response randomness
+</ParamField>
+
+<ParamField path="api_key" type="Option<String>" default="None">
+  API key for primary provider (also checked: ONECLAW_API_KEY env)
+</ParamField>
+
+<ParamField path="fallback" type="Vec<String>" default="[]">
+  Fallback provider chain (tried in order after primary fails)
+</ParamField>
+
+<ParamField path="max_retries" type="u32" default="1">
+  Max retries per provider before moving to next in chain
+</ParamField>
+
+<ParamField path="keys" type="HashMap<String, String>" default="{}">
+  Per-provider API keys (overrides primary api_key for specific provider)
+</ParamField>
+
+<ParamField path="ollama_endpoint" type="Option<String>" default="None">
+  Ollama endpoint override (default: http://localhost:11434)
+</ParamField>
+
+<ParamField path="ollama_model" type="Option<String>" default="None">
+  Ollama model override (separate from primary model)
+</ParamField>
+
+## Methods
+
+### load
+
+Load config from a TOML file.
+
+```rust
+pub fn load(path: impl AsRef<Path>) -> Result<Self>
+```
+
+<ParamField path="path" type="impl AsRef<Path>" required>
+  Path to TOML configuration file
+</ParamField>
+
+<ResponseField name="return" type="Result<OneClawConfig>">
+  Loaded configuration, or error if file not found or invalid TOML
+</ResponseField>
+
+**Example:**
+
+```rust
+use oneclaw_core::config::OneClawConfig;
+
+let config = OneClawConfig::load("oneclaw.toml")?;
+println!("Agent name: {}", config.runtime.name);
+```
+
+### default_config
+
+Load with defaults (no file needed).
+
+```rust
+pub fn default_config() -> Self
+```
+
+<ResponseField name="return" type="Self">
+  Configuration with all default values
+</ResponseField>
+
+**Example:**
+
+```rust
+let config = OneClawConfig::default_config();
+assert_eq!(config.runtime.name, "oneclaw");
+assert!(config.security.deny_by_default);
+```
+
+## Example Configuration (TOML)
+
+### Minimal Configuration
+
+```toml
+[runtime]
+name = "my-agent"
+log_level = "info"
+
+[provider]
+primary = "anthropic"
+model = "claude-sonnet-4-20250514"
+max_tokens = 2048
+temperature = 0.5
+```
+
+### Full Configuration with Fallback Chain
+
+```toml
+[security]
+deny_by_default = true
+pairing_required = true
+workspace_only = true
+persist_path = "data/security.db"
+persist_pairing = true
+
+[runtime]
+name = "oneclaw-prod"
+log_level = "info"
+
+[provider]
+primary = "anthropic"
+model = "claude-sonnet-4-20250514"
+max_tokens = 2048
+temperature = 0.5
+api_key = "sk-ant-..."
+fallback = ["openai", "ollama"]
+max_retries = 2
+
+[provider.keys]
+openai = "sk-..."
+google = "AIza..."
+
+[memory]
+backend = "sqlite"
+db_path = "data/oneclaw.db"
+
+[channels]
+active = ["cli", "telegram"]
+
+[telegram]
+bot_token = "123456:ABC-DEF..."
+allowed_chat_ids = [12345, 67890]
+polling_timeout = 30
+```
+
+### Configuration with MQTT
+
+```toml
+[runtime]
+name = "iot-agent"
+
+[channels]
+active = ["cli", "mqtt"]
+
+[mqtt]
+host = "mqtt.local"
+port = 1883
+client_id = "oneclaw-01"
+subscribe_topics = ["sensors/#", "devices/+/data"]
+publish_prefix = "oneclaw/alerts"
+username = "device"
+password = "secret"
+keep_alive_secs = 60
+```
+
+## Environment Variable Overrides
+
+The following environment variables override config file values:
+
+- `ONECLAW_API_KEY` - Primary provider API key
+- `OPENAI_API_KEY` - OpenAI-specific key (if using OpenAI provider)
+- `ANTHROPIC_API_KEY` - Anthropic-specific key (if using Anthropic provider)
+
+**Example:**
+
+```bash
+export ONECLAW_API_KEY="sk-ant-api03-..."
+./oneclaw
+```
+
+## Security Notes
+
+<Warning>
+  API keys in config files should be protected with appropriate file permissions (0600).
+  Consider using environment variables for production deployments.
+</Warning>
+
+<Info>
+  Debug output automatically masks API keys and bot tokens, showing only first 4 and last 4 characters.
+</Info>

@@ -1,0 +1,237 @@
+---
+title: LLM Commands
+description: Query LLM providers with automatic fallback and context enrichment
+---
+
+## ask
+
+Send a question to the LLM provider with automatic memory context injection.
+
+**Usage:**
+```
+ask <question>
+```
+
+**Example:**
+```
+> ask What are the benefits of edge AI?
+Edge AI provides several key advantages: reduced latency by processing data 
+locally, enhanced privacy by keeping sensitive data on-device, lower bandwidth 
+costs, and continued operation during network outages. It's ideal for IoT, 
+smart home, and industrial applications.
+```
+
+**Security:** Requires `llm` authorization
+
+**Pipeline Flow:**
+
+1. **Memory search:** Query memory for relevant context (hybrid FTS5 + vector)
+2. **Context injection:** Add top 5 memory results to prompt
+3. **LLM call:** Send to configured provider (Anthropic, OpenAI, etc.)
+4. **Response:** Display LLM output with usage metrics
+
+**With Memory Context:**
+```
+> remember Edge AI reduces latency by processing data locally
+Remembered. (ID: a1b2c3d4, total memories: 5)
+
+> ask Why is edge AI faster?
+```
+
+**Internal prompt:**
+```
+Related data from memory:
+- [02/03 14:30] Edge AI reduces latency by processing data locally
+
+User question: Why is edge AI faster?
+```
+
+**LLM response:**
+```
+Edge AI is faster because it processes data locally on the device rather than 
+sending it to cloud servers. This eliminates network round-trip time, which is 
+especially critical for real-time applications like autonomous systems and 
+industrial control.
+```
+
+## Free-Form Text (Implicit LLM)
+
+Any input that doesn't match a command is automatically sent to the LLM pipeline.
+
+**Example:**
+```
+> Explain vector search
+Vector search finds similar items by comparing mathematical representations 
+(embeddings) of data. It measures distance between vectors using metrics like 
+cosine similarity. This enables semantic search that understands meaning rather 
+than just matching keywords.
+```
+
+Equivalent to `ask Explain vector search`.
+
+**Security:** Requires `llm` authorization (same as `ask`)
+
+## providers
+
+List configured LLM providers and their online status.
+
+**Usage:**
+```
+providers
+```
+
+**Example Output:**
+```
+LLM Provider:
+  anthropic — online
+  Chain: anthropic → ollama (fallback)
+```
+
+**Security:** Requires `system:providers` authorization
+
+**Offline Mode:**
+```
+> providers
+No LLM provider configured (offline mode).
+```
+
+**Provider Status:**
+- **online:** API reachable, ready for requests
+- **offline:** Network error, invalid API key, or service unavailable
+
+## Provider Selection
+
+OneClaw supports 6 LLM providers:
+
+| Provider | Models | Use Case |
+|----------|--------|----------|
+| **Anthropic** | claude-sonnet-4, claude-opus-4 | Production, high-quality reasoning |
+| **OpenAI** | gpt-4o, gpt-4o-mini | General purpose, function calling |
+| **DeepSeek** | deepseek-chat | Cost-effective alternative |
+| **Groq** | llama-3.3-70b, mixtral-8x7b | Ultra-low latency inference |
+| **Google** | gemini-2.0-flash | Multimodal, large context |
+| **Ollama** | llama3.2, mistral, qwen | Local/offline, privacy-focused |
+
+### Configuration
+
+**Primary provider** in `config/oneclaw.toml`:
+
+```toml
+[provider]
+primary = "anthropic"
+model = "claude-sonnet-4-20250514"
+max_tokens = 1024
+temperature = 0.3
+fallback = ["ollama"]  # Try Ollama if Anthropic fails
+```
+
+**API keys:**
+
+```bash
+export ANTHROPIC_API_KEY="sk-ant-..."
+export OPENAI_API_KEY="sk-..."
+export GOOGLE_API_KEY="AIza..."
+# Or set in config/oneclaw.toml [provider.keys]
+```
+
+**Ollama (local):**
+```toml
+[provider.ollama]
+url = "http://localhost:11434"
+model = "llama3.2"
+```
+
+## Automatic Fallback Chain
+
+When primary provider fails, OneClaw automatically tries fallback providers:
+
+**Example config:**
+```toml
+[provider]
+primary = "anthropic"
+fallback = ["openai", "ollama"]
+```
+
+**Behavior:**
+1. Try Anthropic (primary)
+2. If fails → Try OpenAI (fallback 1)
+3. If fails → Try Ollama (fallback 2)
+4. If all fail → Offline mode response
+
+**Offline Mode Response:**
+```
+[Offline mode] LLM unavailable (anthropic). Data saved, will process when connected.
+2 related entries found in memory.
+```
+
+**Verify chain:**
+```
+> status
+...
+Provider: anthropic (online)
+Chain: anthropic → openai → ollama (fallback)
+...
+```
+
+## Complexity Analysis
+
+OneClaw automatically analyzes query complexity to optimize LLM usage:
+
+**Simple queries:** Short, direct questions
+- "What is edge AI?"
+- "List the layers"
+
+**Complex queries:** Multi-step reasoning, memory context
+- "Compare the benefits of edge AI vs cloud AI for industrial IoT"
+- "Based on my stored sensor data, what patterns do you see?"
+
+**Impact:**
+- Affects model selection in multi-model setups
+- Adjusts context window size
+- Logged in metrics for analysis
+
+## Context Manager
+
+The orchestrator enriches prompts with:
+
+1. **System prompt:** Role definition ("You are OneClaw, a helpful AI assistant...")
+2. **Memory context:** Top 5 relevant memory entries
+3. **User message:** Original query
+
+**Example enriched prompt:**
+```
+System: You are OneClaw, a helpful AI assistant running on an edge device. 
+Answer concisely and clearly. When relevant data is available from memory, 
+incorporate it into your response.
+
+Related data from memory:
+- [02/03 14:15] The greenhouse temperature threshold is 28°C
+- [01/03 09:30] Temperature sensor installed in greenhouse zone B
+
+User: What's the greenhouse temperature limit?
+```
+
+## Performance Metrics
+
+Track LLM performance via `metrics` command:
+
+```
+LLM:
+  Calls: 15
+  Failed: 1
+  Tokens: 12,450
+  Latency (total): 3,675ms
+  Latency (avg): 245ms
+```
+
+**Metrics:**
+- **Calls:** Total LLM API requests
+- **Failed:** Network errors, rate limits, invalid responses
+- **Tokens:** Total input + output tokens consumed
+- **Latency:** Average response time per call
+
+**Logging:**
+```
+[INFO] complexity=Simple has_memory=true Message analysis
+[INFO] provider=anthropic LLM response received
+```

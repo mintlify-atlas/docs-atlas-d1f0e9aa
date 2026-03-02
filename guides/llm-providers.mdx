@@ -1,0 +1,466 @@
+---
+title: Working with LLM Providers
+description: Configure LLM providers, fallback chains, and error handling in OneClaw
+---
+
+# Working with LLM Providers
+
+OneClaw supports multiple LLM providers through a unified `Provider` trait. All providers share the same interface for maximum flexibility and easy switching between models.
+
+## Supported Providers
+
+OneClaw supports 6 LLM providers across three tiers:
+
+**Tier 1 (Cloud - Primary)**
+- **Anthropic Claude** - Primary provider, best balance of quality and speed
+- **OpenAI GPT** - GPT-4o family, industry standard
+- **Google Gemini** - Multimodal, fast and cost-effective
+
+**Tier 2 (Cloud - Secondary)**
+- **DeepSeek** - Reasoning-focused models
+- **Groq** - Ultra-fast inference (Llama, Mixtral)
+
+**Local**
+- **Ollama** - Self-hosted, offline capable, perfect for edge deployment
+
+## Provider Configuration
+
+Configure providers in `oneclaw.toml`:
+
+```toml
+[provider]
+primary = "anthropic"
+model = "claude-sonnet-4-20250514"
+max_tokens = 1024
+temperature = 0.3
+max_retries = 2
+
+# Fallback providers (tried in order if primary fails)
+fallback = ["openai", "ollama"]
+
+# API keys (per-provider)
+[provider.keys]
+anthropic = "sk-ant-..."
+openai = "sk-..."
+google = "AIza..."
+
+# Ollama-specific settings
+ollama_endpoint = "http://localhost:11434"
+ollama_model = "llama3.2:3b"
+```
+
+### API Key Resolution
+
+API keys are resolved in this order:
+
+1. **Per-provider key** in `[provider.keys]`
+2. **Global key** in `provider.api_key`
+3. **Environment variable** `ONECLAW_API_KEY`
+4. **Provider-specific env var** (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, etc.)
+
+## Configuring Each Provider
+
+### Anthropic Claude
+
+```toml
+[provider]
+primary = "anthropic"
+model = "claude-sonnet-4-20250514"  # or "claude-haiku-4-5-20251001" for speed
+
+[provider.keys]
+anthropic = "sk-ant-your-key"
+```
+
+**Models:**
+- `claude-sonnet-4-20250514` - Best balance (default)
+- `claude-haiku-4-5-20251001` - Fast, cheap, good for classification
+- `claude-opus-4-5-20250918` - Max quality, expensive
+
+**Code example:**
+
+```rust
+use oneclaw_core::provider::{
+    anthropic::AnthropicProvider,
+    traits::{Provider, ProviderConfig},
+};
+
+let config = ProviderConfig {
+    provider_id: "anthropic".into(),
+    endpoint: None,
+    api_key: Some("sk-ant-...".into()),
+    model: "claude-sonnet-4-20250514".into(),
+    max_tokens: 1024,
+    temperature: 0.3,
+};
+
+let provider = AnthropicProvider::new(config)?;
+let response = provider.chat(
+    "You are a helpful assistant",
+    "What is Rust?"
+)?;
+
+println!("Response: {}", response.content);
+```
+
+### OpenAI GPT
+
+```toml
+[provider]
+primary = "openai"
+model = "gpt-4o"  # or "gpt-4o-mini" for lower cost
+
+[provider.keys]
+openai = "sk-your-key"
+```
+
+**Models:**
+- `gpt-4o` - Flagship model (default)
+- `gpt-4o-mini` - Faster, cheaper
+
+**Code example:**
+
+```rust
+use oneclaw_core::provider::{
+    openai_compat::OpenAICompatibleProvider,
+    traits::ProviderConfig,
+};
+
+let config = ProviderConfig {
+    provider_id: "openai".into(),
+    endpoint: None,
+    api_key: Some("sk-...".into()),
+    model: "gpt-4o".into(),
+    max_tokens: 1024,
+    temperature: 0.3,
+};
+
+let provider = OpenAICompatibleProvider::openai(config)?;
+```
+
+### Google Gemini
+
+```toml
+[provider]
+primary = "google"
+model = "gemini-2.0-flash"  # Fast and cheap
+
+[provider.keys]
+google = "AIza-your-key"
+```
+
+**Models:**
+- `gemini-2.0-flash` - Fast, cheap, good quality (default)
+- `gemini-2.0-flash-lite` - Fastest, cheapest
+- `gemini-2.5-pro` - Best quality, expensive
+
+**Code example:**
+
+```rust
+use oneclaw_core::provider::{
+    gemini::GeminiProvider,
+    traits::ProviderConfig,
+};
+
+let config = ProviderConfig {
+    provider_id: "google".into(),
+    endpoint: None,
+    api_key: Some("AIza...".into()),
+    model: "gemini-2.0-flash".into(),
+    max_tokens: 1024,
+    temperature: 0.3,
+};
+
+let provider = GeminiProvider::new(config)?;
+```
+
+### Ollama (Local)
+
+```toml
+[provider]
+primary = "ollama"
+ollama_endpoint = "http://localhost:11434"
+ollama_model = "llama3.2:3b"  # Recommended for edge devices
+```
+
+**Recommended models:**
+- `llama3.2:3b` - Best balance for edge (Raspberry Pi 4)
+- `phi3:mini` - Smaller, faster
+- `qwen2.5:3b` - Multilingual, Vietnamese support
+
+**Code example:**
+
+```rust
+use oneclaw_core::provider::{
+    ollama::OllamaProvider,
+    traits::Provider,
+};
+
+let provider = OllamaProvider::new(
+    Some("http://localhost:11434"),
+    Some("llama3.2:3b")
+)?;
+
+// Check if Ollama is running
+if provider.is_available() {
+    let response = provider.chat("System prompt", "User message")?;
+    println!("Response: {}", response.content);
+}
+```
+
+## Fallback Chains with ReliableProvider
+
+Build resilient systems with automatic failover:
+
+### FallbackChain
+
+Tries providers in order until one succeeds:
+
+```rust
+use oneclaw_core::provider::{
+    anthropic::AnthropicProvider,
+    openai_compat::OpenAICompatibleProvider,
+    ollama::OllamaProvider,
+    traits::{FallbackChain, Provider},
+};
+
+let chain = FallbackChain::new(vec![
+    Box::new(AnthropicProvider::new(anthropic_config)?),
+    Box::new(OpenAICompatibleProvider::openai(openai_config)?),
+    Box::new(OllamaProvider::default_local()?),
+]);
+
+// Tries Anthropic → OpenAI → Ollama until one succeeds
+let response = chain.chat("system", "hello")?;
+println!("Responded by: {}", response.provider_id);
+```
+
+**Config-driven chain:**
+
+```toml
+[provider]
+primary = "anthropic"
+fallback = ["openai", "ollama"]
+max_retries = 2
+```
+
+```rust
+use oneclaw_core::provider::chain_builder::build_provider_chain;
+use oneclaw_core::config::ProviderConfigToml;
+
+let config: ProviderConfigToml = /* load from file */;
+
+let provider = build_provider_chain(&config)
+    .expect("No providers available");
+
+// Now provider is either:
+// - Single provider if no fallbacks
+// - FallbackChain wrapping all configured providers
+```
+
+### ReliableProvider
+
+Wraps a provider with retry logic:
+
+```rust
+use oneclaw_core::provider::traits::{ReliableProvider, Provider};
+
+let base = AnthropicProvider::new(config)?;
+let reliable = ReliableProvider::new(base, 3); // 3 retries
+
+// Automatically retries on failure
+let response = reliable.chat("system", "user message")?;
+```
+
+**How it works:**
+
+```rust:src/provider/traits.rs:125-142
+fn chat(&self, system: &str, user_message: &str) -> Result<ProviderResponse> {
+    let mut last_err = None;
+    for attempt in 0..=self.max_retries {
+        match self.inner.chat(system, user_message) {
+            Ok(response) => return Ok(response),
+            Err(e) => {
+                tracing::warn!(
+                    provider = self.inner.id(),
+                    attempt = attempt + 1,
+                    error = %e,
+                    "Provider call failed, retrying"
+                );
+                last_err = Some(e);
+            }
+        }
+    }
+    Err(last_err.expect("at least one attempt was made"))
+}
+```
+
+## Provider Selection Logic
+
+The `FallbackChain` uses this logic:
+
+```rust:src/provider/traits.rs:211-234
+fn chat(&self, system: &str, user_message: &str) -> Result<ProviderResponse> {
+    for provider in &self.providers {
+        if !provider.is_available() {
+            tracing::debug!(provider = provider.id(), "Skipping unavailable provider");
+            continue;
+        }
+        match provider.chat(system, user_message) {
+            Ok(response) => {
+                tracing::info!(provider = provider.id(), "Provider responded");
+                return Ok(response);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    provider = provider.id(),
+                    error = %e,
+                    "Provider failed, trying next"
+                );
+            }
+        }
+    }
+    Err(crate::error::OneClawError::Provider(
+        "All providers in fallback chain failed".into()
+    ))
+}
+```
+
+**Key behaviors:**
+- Skips unavailable providers (e.g., Ollama not running)
+- Logs each attempt for debugging
+- Returns first successful response
+- Fails only if all providers fail
+
+## Error Handling
+
+### Provider-Specific Errors
+
+Each provider handles errors differently:
+
+**Anthropic:**
+```rust
+let error_msg = match serde_json::from_str::<AnthropicErrorResponse>(&body) {
+    Ok(err) => format!(
+        "Anthropic API error {}: {} — {}",
+        status, err.error.error_type, err.error.message
+    ),
+    Err(_) => format!("Anthropic API error {}: {}", status, body),
+};
+```
+
+**OpenAI:**
+```rust
+let error_msg = match serde_json::from_str::<OpenAIErrorResponse>(&body) {
+    Ok(err) => format!(
+        "{} API error {}: {} ({})",
+        self.preset.display_name,
+        status,
+        err.error.message,
+        err.error.error_type.as_deref().unwrap_or("unknown"),
+    ),
+    Err(_) => format!("{} API error {}: {}", self.preset.display_name, status, body),
+};
+```
+
+**Ollama:**
+```rust
+let error_msg = if e.is_connect() {
+    format!(
+        "Ollama not reachable at {}. Is `ollama serve` running?",
+        self.endpoint
+    )
+} else if e.is_timeout() {
+    format!(
+        "Ollama timed out after {}s. Model may be too large for this hardware.",
+        DEFAULT_TIMEOUT_SECS
+    )
+} else {
+    format!("Ollama request failed: {}", e)
+};
+```
+
+### Handling Errors in Your Code
+
+```rust
+use oneclaw_core::error::OneClawError;
+
+match provider.chat("system", "user message") {
+    Ok(response) => {
+        println!("Success: {}", response.content);
+        if let Some(usage) = response.usage {
+            println!("Tokens: {}", usage.total_tokens);
+        }
+    }
+    Err(OneClawError::Provider(msg)) => {
+        eprintln!("Provider error: {}", msg);
+        // Try fallback or return error to user
+    }
+    Err(e) => {
+        eprintln!("Other error: {}", e);
+    }
+}
+```
+
+## Provider Trait Interface
+
+All providers implement this trait:
+
+```rust:src/provider/traits.rs:82-104
+pub trait Provider: Send + Sync {
+    /// Provider identifier (e.g., "anthropic", "openai", "ollama")
+    fn id(&self) -> &'static str;
+
+    /// Send a single message with system prompt
+    /// Used for: simple queries, alert generation, classification
+    fn chat(&self, system: &str, user_message: &str) -> Result<ProviderResponse>;
+
+    /// Send a conversation with history
+    /// Used for: multi-turn conversations, context-aware responses
+    fn chat_with_history(
+        &self,
+        system: &str,
+        messages: &[ChatMessage],
+    ) -> Result<ProviderResponse>;
+
+    /// Health check — can this provider respond right now?
+    /// Used for: fallback chain decisions, status reporting
+    fn is_available(&self) -> bool;
+
+    /// Human-readable name for display
+    fn display_name(&self) -> &str;
+}
+```
+
+### Response Format
+
+```rust
+pub struct ProviderResponse {
+    /// The generated text
+    pub content: String,
+    /// Which provider actually served the response
+    pub provider_id: &'static str,
+    /// Token usage (if available)
+    pub usage: Option<TokenUsage>,
+}
+
+pub struct TokenUsage {
+    pub prompt_tokens: u32,
+    pub completion_tokens: u32,
+    pub total_tokens: u32,
+}
+```
+
+## Best Practices
+
+1. **Use fallback chains for production**: `anthropic → openai → ollama`
+2. **Configure retries per-provider**: `max_retries = 2` in config
+3. **Monitor token usage**: Check `response.usage` to track costs
+4. **Test locally first**: Use Ollama for development before cloud deployment
+5. **Set reasonable timeouts**: Cloud = 60s, Ollama = 120s (edge hardware is slow)
+6. **Handle provider-specific errors**: Different providers return different error formats
+
+## See Also
+
+- [Configuration Reference](/configuration) - Full config options
+- [Architecture](/architecture) - Provider layer design
+- [API Reference](/api/provider) - Detailed trait documentation

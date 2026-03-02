@@ -1,0 +1,328 @@
+---
+title: SecurityCore Trait
+description: Core security trait definition and implementations for OneClaw Layer 0 Security
+---
+
+# SecurityCore Trait
+
+The `SecurityCore` trait defines the core security interface for OneClaw Layer 0. It provides authorization, filesystem validation, and device pairing capabilities.
+
+## Trait Definition
+
+```rust
+pub trait SecurityCore: Send + Sync {
+    /// Authorize an action. Deny-by-default.
+    fn authorize(&self, action: &Action) -> Result<Permit>;
+
+    /// Check if a filesystem path is allowed
+    fn check_path(&self, path: &std::path::Path) -> Result<()>;
+
+    /// Generate a one-time pairing code
+    fn generate_pairing_code(&self) -> Result<String>;
+
+    /// Verify a pairing code and return device identity
+    fn verify_pairing_code(&self, code: &str) -> Result<Identity>;
+
+    /// List all paired devices
+    fn list_devices(&self) -> Result<Vec<PairedDevice>>;
+
+    /// Remove a paired device by device_id (exact or prefix match)
+    fn remove_device(&self, device_id_prefix: &str) -> Result<PairedDevice>;
+}
+```
+
+**Source:** `crates/oneclaw-core/src/security/traits.rs:75`
+
+## Required Methods
+
+### `authorize()`
+
+Authorize an action with deny-by-default semantics.
+
+**Signature:**
+```rust
+fn authorize(&self, action: &Action) -> Result<Permit>
+```
+
+**Parameters:**
+- `action` - The action to authorize (see [Authorization API](/api/security/authorization))
+
+**Returns:** `Result<Permit>` - Authorization decision with reason
+
+### `check_path()`
+
+Validate if a filesystem path is allowed for access.
+
+**Signature:**
+```rust
+fn check_path(&self, path: &std::path::Path) -> Result<()>
+```
+
+**Parameters:**
+- `path` - Filesystem path to validate
+
+**Returns:** `Result<()>` - Ok if allowed, Error if denied
+
+### `generate_pairing_code()`
+
+Generate a one-time pairing code for device authentication.
+
+**Signature:**
+```rust
+fn generate_pairing_code(&self) -> Result<String>
+```
+
+**Returns:** `Result<String>` - 6-digit pairing code
+
+### `verify_pairing_code()`
+
+Verify a pairing code and return the device identity.
+
+**Signature:**
+```rust
+fn verify_pairing_code(&self, code: &str) -> Result<Identity>
+```
+
+**Parameters:**
+- `code` - The pairing code to verify
+
+**Returns:** `Result<Identity>` - Device identity if code is valid
+
+### `list_devices()`
+
+List all currently paired devices.
+
+**Signature:**
+```rust
+fn list_devices(&self) -> Result<Vec<PairedDevice>>
+```
+
+**Returns:** `Result<Vec<PairedDevice>>` - List of paired devices
+
+### `remove_device()`
+
+Remove a paired device by ID or ID prefix.
+
+**Signature:**
+```rust
+fn remove_device(&self, device_id_prefix: &str) -> Result<PairedDevice>
+```
+
+**Parameters:**
+- `device_id_prefix` - Full or partial device ID
+
+**Returns:** `Result<PairedDevice>` - The removed device record
+
+## NoopSecurity Implementation
+
+`NoopSecurity` is a testing-only implementation that allows all actions.
+
+**Source:** `crates/oneclaw-core/src/security/traits.rs:96`
+
+```rust
+pub struct NoopSecurity;
+```
+
+### Behavior
+
+- **authorize()**: Always returns `granted: true`
+- **check_path()**: Allows all paths
+- **generate_pairing_code()**: Returns `"000000"`
+- **verify_pairing_code()**: Returns `Identity { device_id: "noop-device", ... }`
+- **list_devices()**: Returns empty list
+- **remove_device()**: Always fails
+
+### Usage
+
+```rust
+use oneclaw_core::security::{SecurityCore, NoopSecurity, Action, ActionKind};
+
+let security = NoopSecurity;
+let action = Action {
+    kind: ActionKind::Read,
+    resource: "/some/path".into(),
+    actor: "test".into(),
+};
+let permit = security.authorize(&action).unwrap();
+assert!(permit.granted); // Always true
+```
+
+**Warning:** FOR TESTING ONLY. Do not use in production.
+
+## DefaultSecurity Implementation
+
+`DefaultSecurity` is the production-ready security implementation with deny-by-default semantics.
+
+**Source:** `crates/oneclaw-core/src/security/default.rs:19`
+
+```rust
+pub struct DefaultSecurity {
+    path_guard: PathGuard,
+    pairing: PairingManager,
+    paired_devices: Mutex<HashSet<String>>,
+    pairing_required: bool,
+    registry_path: Option<PathBuf>,
+    persistence: Option<SqliteSecurityStore>,
+}
+```
+
+### Features
+
+- **Deny-by-default**: Unpaired devices are rejected
+- **Filesystem scoping**: Path access validated through `PathGuard`
+- **Cryptographic pairing codes**: One-time, TTL-bound, random 6-digit codes
+- **Persistent storage**: Optional SQLite persistence across restarts
+
+### Constructors
+
+#### `new()`
+
+Create with explicit configuration.
+
+```rust
+pub fn new(
+    workspace: impl Into<PathBuf>,
+    workspace_only: bool,
+    pairing_required: bool,
+    pairing_code_ttl_seconds: i64,
+) -> Self
+```
+
+**Source:** `crates/oneclaw-core/src/security/default.rs:34`
+
+#### `production()`
+
+Create with production defaults: workspace-only, pairing required, 5-minute TTL.
+
+```rust
+pub fn production(workspace: impl Into<PathBuf>) -> Self
+```
+
+**Source:** `crates/oneclaw-core/src/security/default.rs:52`
+
+#### `development()`
+
+Create with development defaults: workspace-only, pairing optional, 1-hour TTL.
+
+```rust
+pub fn development(workspace: impl Into<PathBuf>) -> Self
+```
+
+**Source:** `crates/oneclaw-core/src/security/default.rs:58`
+
+### Configuration Methods
+
+#### `with_registry_path()`
+
+Enable flat-file persistence (legacy, deprecated).
+
+```rust
+pub fn with_registry_path(mut self, path: impl Into<PathBuf>) -> Self
+```
+
+**Source:** `crates/oneclaw-core/src/security/default.rs:63`
+
+#### `with_persistence()`
+
+Enable SQLite persistence (recommended).
+
+```rust
+pub fn with_persistence(mut self, store: SqliteSecurityStore) -> Self
+```
+
+**Source:** `crates/oneclaw-core/src/security/default.rs:84`
+
+### Usage Example
+
+```rust
+use oneclaw_core::security::{DefaultSecurity, SqliteSecurityStore};
+use std::path::PathBuf;
+
+// Production configuration
+let workspace = PathBuf::from("/var/oneclaw/workspace");
+let security = DefaultSecurity::production(workspace);
+
+// With SQLite persistence
+let store = SqliteSecurityStore::new("/var/oneclaw/security.db")?;
+let security = DefaultSecurity::production("/var/oneclaw/workspace")
+    .with_persistence(store);
+
+// Development configuration (no pairing required)
+let security = DefaultSecurity::development("./workspace");
+```
+
+## Related Types
+
+### Action
+
+Represents an action requiring authorization.
+
+```rust
+pub struct Action {
+    pub kind: ActionKind,
+    pub resource: String,
+    pub actor: String,
+}
+```
+
+**Source:** `crates/oneclaw-core/src/security/traits.rs:7`
+
+### ActionKind
+
+```rust
+pub enum ActionKind {
+    Read,
+    Write,
+    Execute,
+    Network,
+    PairDevice,
+}
+```
+
+**Source:** `crates/oneclaw-core/src/security/traits.rs:18`
+
+### Permit
+
+Authorization decision with reason.
+
+```rust
+pub struct Permit {
+    pub granted: bool,
+    pub reason: String,
+}
+```
+
+**Source:** `crates/oneclaw-core/src/security/traits.rs:33`
+
+### Identity
+
+Device identity after successful pairing.
+
+```rust
+pub struct Identity {
+    pub device_id: String,
+    pub paired_at: chrono::DateTime<chrono::Utc>,
+}
+```
+
+**Source:** `crates/oneclaw-core/src/security/traits.rs:42`
+
+### PairedDevice
+
+Persistent device record.
+
+```rust
+pub struct PairedDevice {
+    pub device_id: String,
+    pub paired_at: chrono::DateTime<chrono::Utc>,
+    pub label: String,
+    pub last_seen: chrono::DateTime<chrono::Utc>,
+}
+```
+
+**Source:** `crates/oneclaw-core/src/security/traits.rs:51`
+
+## See Also
+
+- [Authorization API](/api/security/authorization) - Using the `authorize()` method
+- [Device Pairing API](/api/security/pairing) - Pairing flow and code management

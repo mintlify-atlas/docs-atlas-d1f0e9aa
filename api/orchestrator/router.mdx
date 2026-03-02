@@ -1,0 +1,292 @@
+---
+title: ModelRouter
+description: Smart routing based on task complexity - routes requests to appropriate models using 4-factor analysis
+---
+
+## Overview
+
+The `ModelRouter` trait enables intelligent routing of requests to different LLM providers and models based on task complexity. It analyzes messages using four factors:
+
+1. **Message length** - Short messages → simple models, long messages → complex models
+2. **Keyword detection** - Emergency/medical terms → complex models, greetings → simple models
+3. **Memory context** - Whether memory context is needed
+4. **Explicit complexity hints** - Caller-specified complexity level
+
+**Source:** `crates/oneclaw-core/src/orchestrator/router.rs`
+
+## Complexity Enum
+
+Defines the complexity level of a task for routing decisions.
+
+```rust
+pub enum Complexity {
+    /// Quick response, use cheapest/fastest model
+    Simple,
+    /// Standard conversation, balanced model
+    Medium,
+    /// Analysis needed, use best available model
+    Complex,
+    /// Life/safety critical, use best model and verify
+    Critical,
+}
+```
+
+### Complexity Levels
+
+- **Simple** - Quick responses, greetings, status checks (≤5 words)
+- **Medium** - Standard conversations with memory context
+- **Complex** - Analysis, comparisons, reasoning tasks (keywords: "analyze", "compare", "why", "explain")
+- **Critical** - Emergency/safety scenarios (keywords: "emergency", "critical", "urgent", "danger")
+
+## ModelChoice Struct
+
+The result of a routing decision.
+
+```rust
+pub struct ModelChoice {
+    /// The selected provider name
+    pub provider: String,
+    /// The selected model identifier
+    pub model: String,
+    /// The reason for this routing decision
+    pub reason: String,
+}
+```
+
+**Example:**
+```rust
+ModelChoice {
+    provider: "ollama".into(),
+    model: "llama3.2:1b".into(),
+    reason: "Complexity Simple → ollama:llama3.2:1b".into(),
+}
+```
+
+## ModelRouter Trait
+
+Core trait for routing requests to appropriate models.
+
+```rust
+pub trait ModelRouter: Send + Sync {
+    /// Select a provider and model for the given complexity level
+    fn route(&self, complexity: Complexity) -> Result<ModelChoice>;
+}
+```
+
+### Methods
+
+#### `route()`
+
+**Location:** `router.rs:38`
+
+Selects a provider and model based on task complexity.
+
+**Parameters:**
+- `complexity: Complexity` - The complexity level of the task
+
+**Returns:**
+- `Result<ModelChoice>` - The selected provider, model, and routing reason
+
+**Example:**
+```rust
+let router = DefaultRouter::from_config(&config);
+let choice = router.route(Complexity::Complex)?;
+println!("Using {}: {}", choice.provider, choice.model);
+```
+
+## DefaultRouter Implementation
+
+Smart router that maps complexity levels to provider/model pairs.
+
+**Location:** `router.rs:54-117`
+
+```rust
+pub struct DefaultRouter {
+    /// Provider configs: (complexity_level, provider_name, model_name)
+    routes: Vec<(Complexity, String, String)>,
+    /// Fallback provider when nothing matches
+    fallback_provider: String,
+    fallback_model: String,
+}
+```
+
+### Constructor Methods
+
+#### `new()`
+
+Create with explicit route mapping.
+
+```rust
+pub fn new(routes: Vec<(Complexity, String, String)>) -> Self
+```
+
+**Example:**
+```rust
+let router = DefaultRouter::new(vec![
+    (Complexity::Simple, "ollama".into(), "llama3.2:1b".into()),
+    (Complexity::Complex, "openai".into(), "gpt-4o".into()),
+]);
+```
+
+#### `from_config()`
+
+**Location:** `router.rs:73-96`
+
+Create from configuration - maps complexity to configured providers.
+
+```rust
+pub fn from_config(config: &ProvidersConfig) -> Self
+```
+
+**Current behavior:** All complexity levels route to the default provider. Sprint 7-8 will add multi-provider routing (simple→local, complex→cloud).
+
+**Example:**
+```rust
+let config = ProvidersConfig {
+    default: "ollama".into(),
+    ollama: OllamaConfig {
+        url: "http://localhost:11434".into(),
+        model: "llama3.2:1b".into(),
+    },
+    // ...
+};
+let router = DefaultRouter::from_config(&config);
+```
+
+### Routing Logic
+
+**Location:** `router.rs:98-117`
+
+The router iterates through configured routes, matching on complexity level:
+
+```rust
+for (level, provider, model) in &self.routes {
+    if *level == complexity {
+        return Ok(ModelChoice {
+            provider: provider.clone(),
+            model: model.clone(),
+            reason: format!("Complexity {:?} → {}:{}", complexity, provider, model),
+        });
+    }
+}
+
+// Fallback if no match
+Ok(ModelChoice {
+    provider: self.fallback_provider.clone(),
+    model: self.fallback_model.clone(),
+    reason: format!("No route for {:?}, using fallback", complexity),
+})
+```
+
+## Complexity Analysis
+
+**Location:** `router.rs:120-149`
+
+Utility function to analyze messages and determine complexity.
+
+```rust
+pub fn analyze_complexity(message: &str, has_memory_context: bool) -> Complexity
+```
+
+**Analysis Logic:**
+
+1. **Critical keywords** (highest priority): "emergency", "critical", "urgent", "danger", "alert", "shutdown", "failure", "fatal"
+2. **Complex keywords**: "analyze", "compare", "why", "explain", "trend", "diagnose", "recommend", "evaluate"
+3. **Memory context**: If memory context exists and message > 5 words → Medium
+4. **Message length**: ≤5 words → Simple, otherwise Medium
+
+**Example:**
+```rust
+// Critical
+let complexity = analyze_complexity("emergency alert detected!", false);
+assert_eq!(complexity, Complexity::Critical);
+
+// Complex
+let complexity = analyze_complexity("analyze trend data over 7 days", false);
+assert_eq!(complexity, Complexity::Complex);
+
+// Simple
+let complexity = analyze_complexity("hello", false);
+assert_eq!(complexity, Complexity::Simple);
+
+// Medium (with context)
+let complexity = analyze_complexity("what are readings today", true);
+assert_eq!(complexity, Complexity::Medium);
+```
+
+## NoopRouter
+
+**Location:** `router.rs:42-51`
+
+No-operation router that always returns a placeholder.
+
+```rust
+pub struct NoopRouter;
+
+impl ModelRouter for NoopRouter {
+    fn route(&self, _complexity: Complexity) -> Result<ModelChoice> {
+        Ok(ModelChoice {
+            provider: "noop".into(),
+            model: "noop".into(),
+            reason: "noop router".into(),
+        })
+    }
+}
+```
+
+## Usage Examples
+
+### Basic Routing
+
+```rust
+use oneclaw_core::orchestrator::{DefaultRouter, Complexity};
+
+let router = DefaultRouter::new(vec![
+    (Complexity::Simple, "ollama".into(), "llama3.2:1b".into()),
+    (Complexity::Medium, "ollama".into(), "llama3.2:3b".into()),
+    (Complexity::Complex, "openai".into(), "gpt-4o".into()),
+    (Complexity::Critical, "openai".into(), "gpt-4o".into()),
+]);
+
+let choice = router.route(Complexity::Simple)?;
+println!("Route: {} - {}", choice.provider, choice.model);
+println!("Reason: {}", choice.reason);
+```
+
+### Automatic Complexity Detection
+
+```rust
+use oneclaw_core::orchestrator::{analyze_complexity, DefaultRouter};
+
+let message = "analyze sensor trends over the past week";
+let complexity = analyze_complexity(message, true);
+
+let router = DefaultRouter::from_config(&config);
+let choice = router.route(complexity)?;
+```
+
+### Integration with Config
+
+```rust
+use oneclaw_core::config::ProvidersConfig;
+use oneclaw_core::orchestrator::{DefaultRouter, Complexity};
+
+let config = ProvidersConfig::load()?;
+let router = DefaultRouter::from_config(&config);
+
+let choice = router.route(Complexity::Complex)?;
+```
+
+## Future Enhancements
+
+**Sprint 7-8:** Multi-provider routing strategy:
+- Simple → Local models (Ollama)
+- Medium → Local models (Ollama with larger context)
+- Complex → Cloud models (OpenAI)
+- Critical → Best cloud model with verification
+
+## See Also
+
+- [ContextManager](/api/orchestrator/context) - Assembles prompts with memory context
+- [ChainExecutor](/api/orchestrator/chain) - Multi-step LLM reasoning
+- [Provider](/api/provider) - LLM provider abstraction

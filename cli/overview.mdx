@@ -1,0 +1,145 @@
+---
+title: CLI Overview
+description: Interactive command-line interface for OneClaw edge AI agent runtime
+---
+
+## Introduction
+
+OneClaw provides an interactive CLI for managing and interacting with the AI agent runtime. The CLI supports real-time commands for system monitoring, memory management, LLM queries, tool execution, and security pairing.
+
+## Interactive Mode
+
+Start the OneClaw runtime to enter interactive mode:
+
+```bash
+cargo run --release -p oneclaw-core
+```
+
+You'll see the runtime boot sequence:
+
+```
+OneClaw runtime booting
+Layer 0: Security Core initialized
+Layer 1: LLM Orchestrator initialized
+Layer 2: Memory initialized
+Layer 3: Event Bus initialized
+Layer 4: Tool Registry initialized
+Runtime ready. All 5 layers initialized.
+```
+
+The CLI accepts commands and free-form text for AI processing.
+
+## Command Format
+
+**Simple commands** (no arguments):
+```
+help
+status
+health
+metrics
+tools
+channels
+providers
+exit
+```
+
+**Commands with arguments**:
+```
+remember <text>
+recall <query>
+ask <question>
+tool <name> [key=value ...]
+verify <CODE>
+unpair <device_id_prefix>
+```
+
+**Free-form text** (sent to LLM pipeline):
+```
+What's the weather like?
+Explain how vector search works
+```
+
+## Help System
+
+Use `help` to display all available commands:
+
+```
+> help
+```
+
+```
+OneClaw Commands:
+  ask Q        - Ask AI a question
+  tools        - List registered tools
+  tool X k=v   - Execute tool X with params (key=value)
+  channels     - List active channels
+  events       - Show event bus status and recent events
+  status       - Show agent status and config
+  metrics      - Show operational metrics (counters, uptime)
+  health       - Health check all layers
+  reload       - Check config file for changes (report only)
+  providers    - List LLM providers and status
+  pair         - Generate device pairing code
+  verify CODE  - Pair device with 6-digit code
+  devices      - List all paired devices
+  unpair ID    - Remove a paired device (prefix match)
+  remember X   - Store X in memory
+  recall X     - Search memory for X
+  help         - Show this help message
+  exit         - Shut down the agent
+
+Any other input will be processed by the AI pipeline.
+```
+
+## Security Model
+
+Only these commands are **always open** (no authorization required):
+- `help`
+- `exit` / `quit` / `q`
+- `pair`
+- `verify CODE`
+
+**All other commands** require device pairing when `deny_by_default = true` in config.
+
+### Pairing Flow
+
+1. Generate pairing code:
+   ```
+   > pair
+   Pairing code: 123456 (valid 5 minutes)
+   ```
+
+2. Verify code from device:
+   ```
+   > verify 123456
+   Device paired successfully!
+     Device ID: abc12345-...
+     Paired at: 2026-03-02 14:30:00 UTC
+     You can now interact with the agent.
+   ```
+
+## Exit Commands
+
+Gracefully shut down the runtime:
+
+```
+exit
+quit
+q
+```
+
+All variants trigger graceful shutdown:
+```
+> exit
+Goodbye!
+Event loop stopped.
+```
+
+## Multi-Channel Support
+
+OneClaw can run multiple input channels simultaneously (CLI, TCP, Telegram, MQTT). Use the `channels` command to see active channels:
+
+```
+> channels
+Active channels (2): cli, tcp
+```

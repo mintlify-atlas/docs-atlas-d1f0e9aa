@@ -1,0 +1,236 @@
+---
+title: Memory Traits
+description: Core Memory and VectorMemory trait definitions for OneClaw Layer 2
+---
+
+## Overview
+
+The Memory layer (Layer 2) provides persistent storage and retrieval of information with metadata support. It implements multi-dimensional search across keyword, temporal, and semantic dimensions.
+
+## Memory Trait
+
+The `Memory` trait defines the core interface for storing and retrieving memory entries.
+
+```rust
+pub trait Memory: Send + Sync {
+    fn store(&self, content: &str, meta: MemoryMeta) -> Result<String>;
+    fn get(&self, id: &str) -> Result<Option<MemoryEntry>>;
+    fn search(&self, query: &MemoryQuery) -> Result<Vec<MemoryEntry>>;
+    fn delete(&self, id: &str) -> Result<bool>;
+    fn count(&self) -> Result<usize>;
+    fn as_vector(&self) -> Option<&dyn VectorMemory>;
+}
+```
+
+### Methods
+
+#### `store()`
+
+```rust
+fn store(&self, content: &str, meta: MemoryMeta) -> Result<String>
+```
+
+Stores content with metadata and returns a unique entry ID.
+
+**Parameters:**
+- `content`: The text content to store
+- `meta`: Metadata including tags, priority, and source
+
+**Returns:** Entry ID (UUID string)
+
+**Source:** `traits.rs:112`
+
+#### `get()`
+
+```rust
+fn get(&self, id: &str) -> Result<Option<MemoryEntry>>
+```
+
+Retrieves a memory entry by its unique identifier.
+
+**Parameters:**
+- `id`: The entry identifier
+
+**Returns:** `Some(MemoryEntry)` if found, `None` otherwise
+
+**Source:** `traits.rs:115`
+
+#### `search()`
+
+```rust
+fn search(&self, query: &MemoryQuery) -> Result<Vec<MemoryEntry>>
+```
+
+Performs multi-dimensional search across text, tags, time range, and priority.
+
+**Parameters:**
+- `query`: Search query with filters
+
+**Returns:** Vector of matching entries
+
+**Source:** `traits.rs:118`
+
+#### `delete()`
+
+```rust
+fn delete(&self, id: &str) -> Result<bool>
+```
+
+Deletes an entry by ID.
+
+**Parameters:**
+- `id`: The entry identifier
+
+**Returns:** `true` if entry was deleted, `false` if not found
+
+**Source:** `traits.rs:121`
+
+#### `count()`
+
+```rust
+fn count(&self) -> Result<usize>
+```
+
+Returns the total number of stored entries.
+
+**Source:** `traits.rs:124`
+
+#### `as_vector()`
+
+```rust
+fn as_vector(&self) -> Option<&dyn VectorMemory>
+```
+
+Upcasts to `VectorMemory` if the implementation supports vector search. Returns `None` by default.
+
+**Source:** `traits.rs:128`
+
+## VectorMemory Trait
+
+Extends `Memory` with vector embedding and semantic search capabilities.
+
+```rust
+pub trait VectorMemory: Memory {
+    fn store_with_embedding(&self, content: &str, meta: MemoryMeta, embedding: &Embedding) -> Result<String>;
+    fn vector_search(&self, query: &VectorQuery) -> Result<Vec<VectorSearchResult>>;
+    fn hybrid_search(&self, text: &str, query_embedding: &Embedding, limit: usize) -> Result<Vec<VectorSearchResult>>;
+    fn has_vector_support(&self) -> bool;
+    fn vector_stats(&self) -> Result<VectorStats>;
+}
+```
+
+**Source:** `vector.rs:115`
+
+See [Vector Search API](/api/memory/vector) for detailed documentation.
+
+## Data Types
+
+### Priority
+
+```rust
+pub enum Priority {
+    Low = 0,
+    Medium = 1,    // default
+    High = 2,
+    Critical = 3,
+}
+```
+
+Priority levels for memory entries.
+
+**Source:** `traits.rs:11`
+
+### MemoryMeta
+
+```rust
+pub struct MemoryMeta {
+    pub tags: Vec<String>,
+    pub priority: Priority,
+    pub source: String,
+}
+```
+
+Metadata associated with each memory entry.
+
+**Source:** `traits.rs:24`
+
+### MemoryEntry
+
+```rust
+pub struct MemoryEntry {
+    pub id: String,
+    pub content: String,
+    pub meta: MemoryMeta,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+```
+
+A complete memory entry with content, metadata, and timestamps.
+
+**Source:** `traits.rs:45`
+
+### MemoryQuery
+
+```rust
+pub struct MemoryQuery {
+    pub text: String,
+    pub tags: Vec<String>,
+    pub after: Option<DateTime<Utc>>,
+    pub before: Option<DateTime<Utc>>,
+    pub min_priority: Option<Priority>,
+    pub limit: usize,
+}
+```
+
+Multi-dimensional search query with builder methods:
+
+```rust
+let query = MemoryQuery::new("blood pressure")
+    .with_tags(vec!["sensor".into()])
+    .with_min_priority(Priority::High)
+    .with_time_range(Some(start_time), None)
+    .with_limit(20);
+```
+
+**Source:** `traits.rs:60`
+
+## NoopMemory Implementation
+
+In-memory stub implementation for testing.
+
+```rust
+pub struct NoopMemory {
+    entries: std::sync::Mutex<Vec<MemoryEntry>>,
+}
+```
+
+### Example Usage
+
+```rust
+use oneclaw_core::memory::{NoopMemory, Memory, MemoryMeta, MemoryQuery};
+
+let mem = NoopMemory::new();
+
+// Store an entry
+let id = mem.store("blood pressure 140/90", MemoryMeta::default())?;
+
+// Retrieve by ID
+let entry = mem.get(&id)?;
+
+// Search
+let results = mem.search(&MemoryQuery::new("blood pressure"))?;
+```
+
+**Features:**
+- Thread-safe with `Mutex`
+- No persistence (data lost on drop)
+- Simple substring matching for text search
+- AND logic for tag filtering
+
+**Source:** `traits.rs:134`
+
+## Related
+
+- [SqliteMemory Implementation](/api/memory/sqlite)
+- [Vector Search API](/api/memory/vector)

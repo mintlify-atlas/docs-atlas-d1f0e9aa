@@ -1,0 +1,366 @@
+---
+title: ContextManager
+description: Assembles prompts with memory context and manages token budgets for LLM calls
+---
+
+## Overview
+
+The `ContextManager` trait handles prompt assembly by combining system prompts, relevant memories, and user messages. It manages context window budgets and compresses content when needed to fit within token limits.
+
+**Core responsibilities:**
+- Assemble full context from task + available memories
+- Manage token budgets using chars-per-token estimation
+- Compress context to fit within limits
+- Format memory entries for LLM consumption
+
+**Source:** `crates/oneclaw-core/src/orchestrator/context.rs`
+
+## ContextManager Trait
+
+Core trait for assembling and compressing prompt context.
+
+```rust
+pub trait ContextManager: Send + Sync {
+    /// Assemble full context from task + available context
+    fn assemble(&self, task: &str, budget_tokens: usize) -> Result<String>;
+    
+    /// Compress context to fit within token budget
+    fn compress(&self, context: &str, target_tokens: usize) -> Result<String>;
+}
+```
+
+### Methods
+
+#### `assemble()`
+
+**Location:** `context.rs:11`
+
+Assembles full context from task and available context, respecting token budget.
+
+**Parameters:**
+- `task: &str` - The user's task or query
+- `budget_tokens: usize` - Maximum number of tokens allowed
+
+**Returns:**
+- `Result<String>` - The assembled context, truncated if over budget
+
+**Example:**
+```rust
+let context_mgr = DefaultContextManager::new("You are OneClaw.");
+let context = context_mgr.assemble("Check sensor status", 1000)?;
+```
+
+#### `compress()`
+
+**Location:** `context.rs:13`
+
+Compresses context to fit within target token count.
+
+**Parameters:**
+- `context: &str` - The context to compress
+- `target_tokens: usize` - Target token count
+
+**Returns:**
+- `Result<String>` - Compressed context with marker if truncated
+
+**Example:**
+```rust
+let compressed = context_mgr.compress(&long_context, 500)?;
+// Output: "...content... (đã rút gọn)"
+```
+
+## DefaultContextManager
+
+Default implementation with system prompt and memory integration.
+
+**Location:** `context.rs:28-96`
+
+```rust
+pub struct DefaultContextManager {
+    system_prompt: String,
+    /// Rough chars-per-token ratio for budget estimation
+    chars_per_token: usize,
+}
+```
+
+### Constructor
+
+#### `new()`
+
+**Location:** `context.rs:36-41`
+
+Creates a new context manager with the given system prompt.
+
+```rust
+pub fn new(system_prompt: impl Into<String>) -> Self
+```
+
+**Parameters:**
+- `system_prompt` - The system prompt for LLM calls
+
+**Default token estimation:** 4 characters per token (average for English/Vietnamese mixed text)
+
+**Example:**
+```rust
+let context_mgr = DefaultContextManager::new(
+    "You are OneClaw, a helpful AI assistant for IoT monitoring."
+);
+```
+
+### Methods
+
+#### `system_prompt()`
+
+**Location:** `context.rs:44-46`
+
+Returns the system prompt.
+
+```rust
+pub fn system_prompt(&self) -> &str
+```
+
+**Example:**
+```rust
+let prompt = context_mgr.system_prompt();
+println!("System: {}", prompt);
+```
+
+#### `build_context()`
+
+**Location:** `context.rs:50-73`
+
+Builds full context string from memories and user message.
+
+```rust
+pub fn build_context(
+    &self,
+    memories: &[String],
+    user_message: &str,
+    budget_tokens: usize
+) -> String
+```
+
+**Parameters:**
+- `memories: &[String]` - Relevant memory entries from search
+- `user_message: &str` - The user's query or message
+- `budget_tokens: usize` - Maximum token budget
+
+**Returns:**
+- `String` - Formatted context with memory section + user message
+
+**Format:**
+```
+Dữ liệu liên quan từ bộ nhớ:
+- [memory 1]
+- [memory 2]
+- ...
+(... còn nữa nhưng đã cắt bớt)
+
+Câu hỏi/yêu cầu: [user message]
+```
+
+**Budget Management:**
+- Estimates characters from token budget (tokens × 4)
+- Iteratively adds memories until budget exhausted
+- Adds truncation marker if memories exceed budget
+- Always includes user message
+
+**Example:**
+```rust
+let memories = vec![
+    "sensor_01 | temperature | value = 22.5".to_string(),
+    "sensor_01 | temperature | value = 23.1".to_string(),
+];
+let context = context_mgr.build_context(
+    &memories,
+    "Analyze sensor readings",
+    1000
+);
+```
+
+### Context Window Management
+
+**Location:** `context.rs:77-84`
+
+The `assemble()` implementation manages context windows by:
+
+1. **Calculating character budget:** `budget_tokens × chars_per_token`
+2. **Truncating if over budget:** Cuts at character limit
+3. **Pass-through if under budget:** Returns task unchanged
+
+```rust
+fn assemble(&self, task: &str, budget_tokens: usize) -> Result<String> {
+    let budget_chars = budget_tokens * self.chars_per_token;
+    if task.len() > budget_chars {
+        Ok(task[..budget_chars].to_string())
+    } else {
+        Ok(task.to_string())
+    }
+}
+```
+
+### Compression Strategy
+
+**Location:** `context.rs:86-96`
+
+The `compress()` implementation uses simple truncation with marker:
+
+1. **Calculate target characters:** `target_tokens × chars_per_token`
+2. **Check if compression needed:** If content ≤ target, return unchanged
+3. **Truncate with marker:** Cut at (target - 20 chars) and append Vietnamese marker
+
+```rust
+fn compress(&self, context: &str, target_tokens: usize) -> Result<String> {
+    let target_chars = target_tokens * self.chars_per_token;
+    if context.len() <= target_chars {
+        Ok(context.to_string())
+    } else {
+        let truncated = &context[..target_chars.saturating_sub(20)];
+        Ok(format!("{}... (đã rút gọn)", truncated))
+    }
+}
+```
+
+## NoopContextManager
+
+**Location:** `context.rs:17-25`
+
+No-operation context manager that passes through input unchanged.
+
+```rust
+pub struct NoopContextManager;
+
+impl ContextManager for NoopContextManager {
+    fn assemble(&self, task: &str, _budget: usize) -> Result<String> {
+        Ok(task.to_string())
+    }
+    
+    fn compress(&self, context: &str, _target: usize) -> Result<String> {
+        Ok(context.to_string())
+    }
+}
+```
+
+Useful for testing or when context management is not needed.
+
+## Usage Examples
+
+### Basic Context Assembly
+
+```rust
+use oneclaw_core::orchestrator::DefaultContextManager;
+
+let context_mgr = DefaultContextManager::new(
+    "You are OneClaw, an edge AI assistant for IoT monitoring."
+);
+
+let task = "Check the status of sensor_01";
+let context = context_mgr.assemble(task, 2000)?;
+```
+
+### Building Context with Memories
+
+```rust
+use oneclaw_core::memory::{Memory, MemoryQuery};
+use oneclaw_core::orchestrator::DefaultContextManager;
+
+// Search for relevant memories
+let query = MemoryQuery::new("sensor temperature").with_limit(5);
+let entries = memory.search(&query)?;
+
+// Extract content from memory entries
+let memories: Vec<String> = entries
+    .iter()
+    .map(|e| e.content.clone())
+    .collect();
+
+// Build context with memories
+let context_mgr = DefaultContextManager::new("You are OneClaw.");
+let context = context_mgr.build_context(
+    &memories,
+    "What are the recent temperature readings?",
+    1000
+);
+
+println!("Context:\n{}", context);
+```
+
+### Compressing Long Context
+
+```rust
+let long_context = "..."; // Very long context string
+let compressed = context_mgr.compress(&long_context, 500)?;
+
+if compressed.contains("đã rút gọn") {
+    println!("Context was truncated to fit budget");
+}
+```
+
+### Integration with Provider
+
+```rust
+use oneclaw_core::orchestrator::DefaultContextManager;
+use oneclaw_core::provider::Provider;
+
+let context_mgr = DefaultContextManager::new(
+    "You are OneClaw, a helpful AI assistant."
+);
+
+// Assemble context with budget
+let context = context_mgr.assemble(user_message, 2000)?;
+
+// Use with provider
+let response = provider.chat(
+    context_mgr.system_prompt(),
+    &context
+)?;
+```
+
+### Budget-Aware Memory Integration
+
+```rust
+// Search for many memories
+let query = MemoryQuery::new("sensor").with_limit(100);
+let entries = memory.search(&query)?;
+
+let memories: Vec<String> = entries
+    .iter()
+    .map(|e| format!("{} | {}", e.created_at.format("%H:%M"), e.content))
+    .collect();
+
+// build_context automatically trims if over budget
+let context = context_mgr.build_context(
+    &memories,
+    "Analyze all sensor data",
+    1000 // Tight budget - will trim memories
+);
+```
+
+## Token Budget Estimation
+
+The default `chars_per_token` ratio is **4 characters per token**, which is a rough average for English/Vietnamese mixed text.
+
+**Examples:**
+- 1000 tokens ≈ 4000 characters
+- 2000 tokens ≈ 8000 characters
+- 500 tokens ≈ 2000 characters
+
+This estimation is intentionally conservative to avoid exceeding actual token limits.
+
+## Vietnamese Language Support
+
+The context manager includes Vietnamese-language formatting:
+
+- **Memory section header:** "Dữ liệu liên quan từ bộ nhớ:"
+- **Truncation marker:** "(... còn nữa nhưng đã cắt bớt)"
+- **User message label:** "Câu hỏi/yêu cầu:"
+- **Compression marker:** "(đã rút gọn)"
+
+This enables OneClaw to serve Vietnamese-speaking users in IoT/healthcare contexts.
+
+## See Also
+
+- [ModelRouter](/api/orchestrator/router) - Routes requests to appropriate models
+- [ChainExecutor](/api/orchestrator/chain) - Multi-step LLM reasoning
+- [Memory](/api/memory) - Memory storage and retrieval
+- [Provider](/api/provider) - LLM provider abstraction

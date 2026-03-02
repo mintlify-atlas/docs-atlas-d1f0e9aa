@@ -1,0 +1,353 @@
+---
+title: Runtime
+description: Main runtime struct for managing the OneClaw event loop and core components
+---
+
+The `Runtime` struct is the main entry point for the OneClaw Core Runtime. It owns all layer implementations (Security, Orchestrator, Memory, Event Bus, Tools) and manages the main event loop.
+
+## Struct Definition
+
+```rust
+pub struct Runtime {
+    pub config: OneClawConfig,
+    pub security: Box<dyn SecurityCore>,
+    pub router: Box<dyn ModelRouter>,
+    pub context_mgr: Box<dyn ContextManager>,
+    pub chain: Box<dyn ChainExecutor>,
+    pub memory: Box<dyn Memory>,
+    pub event_bus: Box<dyn EventBus>,
+    pub tool_registry: Arc<ToolRegistry>,
+    pub metrics: Metrics,
+    pub shutdown: Arc<AtomicBool>,
+    pub provider: Option<Box<dyn Provider>>,
+    pub embedding: Option<Box<dyn EmbeddingProvider>>,
+}
+```
+
+### Fields
+
+<ParamField path="config" type="OneClawConfig">
+  The active configuration loaded from TOML or defaults
+</ParamField>
+
+<ParamField path="security" type="Box<dyn SecurityCore>">
+  The security core implementation (Layer 0) - handles authorization, device pairing, and access control
+</ParamField>
+
+<ParamField path="router" type="Box<dyn ModelRouter>">
+  The model router for LLM provider selection (Layer 1)
+</ParamField>
+
+<ParamField path="context_mgr" type="Box<dyn ContextManager>">
+  The context manager for prompt enrichment (Layer 1)
+</ParamField>
+
+<ParamField path="chain" type="Box<dyn ChainExecutor>">
+  The chain executor for multi-step pipelines (Layer 1)
+</ParamField>
+
+<ParamField path="memory" type="Box<dyn Memory>">
+  The memory backend implementation (Layer 2) - SQLite or NoopMemory
+</ParamField>
+
+<ParamField path="event_bus" type="Box<dyn EventBus>">
+  The event bus implementation (Layer 3) - for event-driven operations
+</ParamField>
+
+<ParamField path="tool_registry" type="Arc<ToolRegistry>">
+  Tool registry (Layer 4) - manages all registered tools available to the agent
+</ParamField>
+
+<ParamField path="metrics" type="Metrics">
+  Operational metrics with AtomicU64 counters for monitoring
+</ParamField>
+
+<ParamField path="shutdown" type="Arc<AtomicBool>">
+  Shutdown flag - set by signal handler or "exit" command to gracefully stop the event loop
+</ParamField>
+
+<ParamField path="provider" type="Option<Box<dyn Provider>>">
+  v1.5 sync Provider for LLM calls (None = offline/no API key)
+</ParamField>
+
+<ParamField path="embedding" type="Option<Box<dyn EmbeddingProvider>>">
+  Embedding provider for vector search (None = disabled, FTS only)
+</ParamField>
+
+## Constructor Methods
+
+### with_defaults
+
+Create runtime with all Noop implementations (for testing or bare boot).
+
+```rust
+pub fn with_defaults(config: OneClawConfig) -> Self
+```
+
+<ParamField path="config" type="OneClawConfig" required>
+  Configuration struct with runtime settings
+</ParamField>
+
+<ResponseField name="return" type="Self">
+  A new Runtime instance with Noop trait implementations
+</ResponseField>
+
+**Example:**
+
+```rust
+use oneclaw_core::config::OneClawConfig;
+use oneclaw_core::runtime::Runtime;
+
+let config = OneClawConfig::default_config();
+let runtime = Runtime::with_defaults(config);
+runtime.boot()?;
+```
+
+### with_security
+
+Create runtime with DefaultSecurity (production mode). Other layers remain Noop until configured.
+
+```rust
+pub fn with_security(
+    config: OneClawConfig,
+    workspace: impl Into<std::path::PathBuf>
+) -> Self
+```
+
+<ParamField path="config" type="OneClawConfig" required>
+  Configuration struct with runtime settings
+</ParamField>
+
+<ParamField path="workspace" type="impl Into<std::path::PathBuf>" required>
+  Workspace directory path for security constraints
+</ParamField>
+
+<ResponseField name="return" type="Self">
+  A new Runtime instance with DefaultSecurity enabled
+</ResponseField>
+
+**Example:**
+
+```rust
+use oneclaw_core::config::OneClawConfig;
+use oneclaw_core::runtime::Runtime;
+use std::env;
+
+let config = OneClawConfig::default_config();
+let workspace = env::current_dir()?;
+let runtime = Runtime::with_security(config, workspace);
+runtime.boot()?;
+```
+
+### from_config
+
+Create runtime from config using Registry to resolve all traits based on configuration.
+
+```rust
+pub fn from_config(
+    config: OneClawConfig,
+    workspace: impl Into<std::path::PathBuf>
+) -> Result<Self>
+```
+
+<ParamField path="config" type="OneClawConfig" required>
+  Configuration struct - determines which implementations to use
+</ParamField>
+
+<ParamField path="workspace" type="impl Into<std::path::PathBuf>" required>
+  Workspace directory path
+</ParamField>
+
+<ResponseField name="return" type="Result<Self>">
+  A new Runtime instance with all traits resolved from config, or an error if resolution fails
+</ResponseField>
+
+**Example:**
+
+```rust
+use oneclaw_core::config::OneClawConfig;
+use oneclaw_core::runtime::Runtime;
+use std::env;
+
+let config = OneClawConfig::load("oneclaw.toml")?;
+let workspace = env::current_dir()?;
+let runtime = Runtime::from_config(config, workspace)?;
+runtime.boot()?;
+```
+
+## Key Methods
+
+### boot
+
+Boot the runtime and initialize all 5 layers.
+
+```rust
+pub fn boot(&self) -> Result<()>
+```
+
+<ResponseField name="return" type="Result<()>">
+  Ok if all layers initialized successfully, otherwise an error
+</ResponseField>
+
+**Example:**
+
+```rust
+let runtime = Runtime::with_defaults(config);
+runtime.boot()?;
+// Runtime is now ready
+```
+
+### run
+
+Run the main event loop with a single channel. Receives messages, processes through security + pipeline, and responds.
+
+```rust
+pub async fn run(&self, channel: &dyn Channel) -> Result<()>
+```
+
+<ParamField path="channel" type="&dyn Channel" required>
+  The communication channel to receive/send messages (e.g., CLI, Telegram, MQTT)
+</ParamField>
+
+<ResponseField name="return" type="Result<()>">
+  Ok when loop exits gracefully, error if channel fails critically
+</ResponseField>
+
+**Example:**
+
+```rust
+use oneclaw_core::channel::CliChannel;
+
+let cli = CliChannel::new();
+runtime.run(&cli).await?;
+```
+
+### run_multi
+
+Run the main event loop with multiple channels via ChannelManager. Polls all channels round-robin.
+
+```rust
+pub async fn run_multi(&self, manager: &ChannelManager) -> Result<()>
+```
+
+<ParamField path="manager" type="&ChannelManager" required>
+  Channel manager containing multiple active channels
+</ParamField>
+
+<ResponseField name="return" type="Result<()>">
+  Ok when loop exits gracefully, error if manager fails critically
+</ResponseField>
+
+**Example:**
+
+```rust
+use oneclaw_core::channel::ChannelManager;
+
+let mut manager = ChannelManager::new();
+manager.add(Box::new(cli_channel));
+manager.add(Box::new(mqtt_channel));
+
+runtime.run_multi(&manager).await?;
+```
+
+### run_chain
+
+Run a chain with the current runtime context (provider, memory, event bus, tools).
+
+```rust
+pub async fn run_chain(
+    &self,
+    chain: &Chain,
+    input: &str
+) -> Result<ChainResult>
+```
+
+<ParamField path="chain" type="&Chain" required>
+  The chain definition to execute
+</ParamField>
+
+<ParamField path="input" type="&str" required>
+  Input text to pass to the first chain step
+</ParamField>
+
+<ResponseField name="return" type="Result<ChainResult>">
+  Chain execution result with output and metadata, or error
+</ResponseField>
+
+**Example:**
+
+```rust
+use oneclaw_core::orchestrator::Chain;
+
+let chain = Chain::new("analyze-and-respond")
+    .with_step("analyze", "Analyze the user's question")
+    .with_step("respond", "Generate a helpful response");
+
+let result = runtime.run_chain(&chain, "What is the weather?").await?;
+println!("Chain output: {}", result.output);
+```
+
+### with_async_event_bus
+
+Replace the event bus with an AsyncEventBus for realtime events (opt-in for sub-10ms latency).
+
+```rust
+pub fn with_async_event_bus(
+    &mut self,
+    capacity: usize
+) -> tokio::sync::broadcast::Sender<Event>
+```
+
+<ParamField path="capacity" type="usize" required>
+  Broadcast channel capacity (e.g., 256)
+</ParamField>
+
+<ResponseField name="return" type="tokio::sync::broadcast::Sender<Event>">
+  The broadcast sender - use `sender.subscribe()` to create receivers
+</ResponseField>
+
+**Example:**
+
+```rust
+let sender = runtime.with_async_event_bus(256);
+let mut rx = sender.subscribe();
+
+tokio::spawn(async move {
+    while let Ok(event) = rx.recv().await {
+        println!("Event: {:?}", event);
+    }
+});
+```
+
+## Built-in Commands
+
+The runtime processes these commands internally:
+
+- `help` - Show all available commands
+- `status` - Show agent status, uptime, and layer information
+- `metrics` - Show operational metrics (counters, latency)
+- `health` - Health check all 5 layers
+- `pair` - Generate device pairing code
+- `verify CODE` - Pair device with 6-digit code
+- `devices` - List all paired devices
+- `unpair ID` - Remove a paired device
+- `tools` - List registered tools
+- `tool X k=v` - Execute tool X with parameters
+- `channels` - List active channels
+- `events` - Show event bus status and recent events
+- `providers` - List LLM providers and status
+- `remember X` - Store X in memory
+- `recall X` - Search memory for X
+- `ask Q` - Ask AI a question
+- `reload` - Check config file for changes (report only)
+- `exit/quit/q` - Shut down the agent
+
+## Security Model
+
+Only `exit`, `help`, `pair`, and `verify` are always-open commands. **All other commands** require security authorization first. The runtime checks:
+
+1. **Rate limiting** - Default 60 requests/minute
+2. **Device pairing** - Device must be paired via `pair` + `verify`
+3. **Per-command authorization** - Each command checks ActionKind + resource
+
+See the [Security](/api/security/traits) docs for details.

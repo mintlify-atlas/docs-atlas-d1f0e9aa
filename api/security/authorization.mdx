@@ -1,0 +1,334 @@
+---
+title: Authorization API
+description: Resource-based authorization and per-command checks in OneClaw Layer 0 Security
+---
+
+# Authorization API
+
+The authorization API provides deny-by-default security through the `authorize()` method. Every action must be explicitly authorized before execution.
+
+## Core Method
+
+### `authorize()`
+
+```rust
+fn authorize(&self, action: &Action) -> Result<Permit>
+```
+
+**Source:** `crates/oneclaw-core/src/security/traits.rs:77`
+
+Authorize an action with deny-by-default semantics. Returns a `Permit` indicating whether the action is granted and the reason for the decision.
+
+**Parameters:**
+- `action: &Action` - The action to authorize
+
+**Returns:**
+- `Result<Permit>` - Authorization decision with reason
+
+## Action Types
+
+Actions are represented by the `Action` struct:
+
+```rust
+pub struct Action {
+    pub kind: ActionKind,
+    pub resource: String,
+    pub actor: String,
+}
+```
+
+**Source:** `crates/oneclaw-core/src/security/traits.rs:7`
+
+### Fields
+
+- **kind**: Type of action being requested (see `ActionKind`)
+- **resource**: Target resource (e.g., file path, command name)
+- **actor**: Device or user requesting the action
+
+### ActionKind Enum
+
+```rust
+pub enum ActionKind {
+    Read,
+    Write,
+    Execute,
+    Network,
+    PairDevice,
+}
+```
+
+**Source:** `crates/oneclaw-core/src/security/traits.rs:18`
+
+- **Read**: Read access to a resource (e.g., read file)
+- **Write**: Write access to a resource (e.g., modify file)
+- **Execute**: Execute a command or tool
+- **Network**: Network access (e.g., HTTP request)
+- **PairDevice**: Device pairing operation
+
+## Authorization Permit
+
+The `Permit` struct represents the authorization decision:
+
+```rust
+pub struct Permit {
+    pub granted: bool,
+    pub reason: String,
+}
+```
+
+**Source:** `crates/oneclaw-core/src/security/traits.rs:33`
+
+- **granted**: `true` if action is authorized, `false` if denied
+- **reason**: Human-readable explanation of the decision
+
+## Authorization Logic (DefaultSecurity)
+
+The `DefaultSecurity` implementation enforces the following rules:
+
+**Source:** `crates/oneclaw-core/src/security/default.rs:147`
+
+### 1. Device Pairing Check
+
+For all actions except `PairDevice`:
+- Device must be in the paired devices list
+- Special exception: `actor == "system"` bypasses pairing check
+- **Denied if:** Device not paired and not "system"
+
+```rust
+if self.pairing_required && !matches!(action.kind, ActionKind::PairDevice) {
+    let devices = self.paired_devices.lock().unwrap_or_else(|e| e.into_inner());
+    if !devices.contains(&action.actor) && action.actor != "system" {
+        return Ok(Permit {
+            granted: false,
+            reason: format!("Device '{}' not paired. Pair first.", action.actor),
+        });
+    }
+}
+```
+
+### 2. Per-Action Authorization
+
+#### PairDevice
+
+```rust
+ActionKind::PairDevice => {
+    Ok(Permit { granted: true, reason: "Pairing action allowed".into() })
+}
+```
+
+**Always allowed** - pairing is how devices get authorized.
+
+**Source:** `crates/oneclaw-core/src/security/default.rs:162`
+
+#### Read / Write
+
+```rust
+ActionKind::Read | ActionKind::Write => {
+    let path = std::path::Path::new(&action.resource);
+    match self.path_guard.check(path) {
+        Ok(()) => Ok(Permit { granted: true, reason: "Path check passed".into() }),
+        Err(e) => Ok(Permit { granted: false, reason: format!("{}", e) }),
+    }
+}
+```
+
+**Path validation required** - filesystem access is checked through `PathGuard`.
+
+**Source:** `crates/oneclaw-core/src/security/default.rs:166`
+
+#### Execute
+
+```rust
+ActionKind::Execute => {
+    Ok(Permit { granted: true, reason: "Execution allowed for paired device".into() })
+}
+```
+
+**Allowed for paired devices** - command execution permitted after pairing.
+
+**Source:** `crates/oneclaw-core/src/security/default.rs:174`
+
+#### Network
+
+```rust
+ActionKind::Network => {
+    Ok(Permit { granted: true, reason: "Network allowed for paired device".into() })
+}
+```
+
+**Allowed for paired devices** - network access permitted after pairing.
+
+**Source:** `crates/oneclaw-core/src/security/default.rs:177`
+
+## Usage Examples
+
+### Basic Authorization
+
+```rust
+use oneclaw_core::security::{DefaultSecurity, Action, ActionKind};
+
+let security = DefaultSecurity::development("/workspace");
+
+// Read action
+let action = Action {
+    kind: ActionKind::Read,
+    resource: "/workspace/data.json".into(),
+    actor: "my-device".into(),
+};
+
+let permit = security.authorize(&action)?;
+if permit.granted {
+    println!("Access granted: {}", permit.reason);
+} else {
+    println!("Access denied: {}", permit.reason);
+}
+```
+
+### Handling Unpaired Devices
+
+```rust
+use oneclaw_core::security::{DefaultSecurity, Action, ActionKind};
+
+let security = DefaultSecurity::production("/workspace");
+
+// Unpaired device attempts read
+let action = Action {
+    kind: ActionKind::Read,
+    resource: "/workspace/secret.txt".into(),
+    actor: "unknown-device".into(),
+};
+
+let permit = security.authorize(&action)?;
+assert!(!permit.granted);
+assert!(permit.reason.contains("not paired"));
+// Output: "Device 'unknown-device' not paired. Pair first."
+```
+
+### System Actor Bypass
+
+```rust
+use oneclaw_core::security::{DefaultSecurity, Action, ActionKind};
+
+let security = DefaultSecurity::production("/workspace");
+
+// System actor bypasses pairing requirement
+let action = Action {
+    kind: ActionKind::Execute,
+    resource: "internal-command".into(),
+    actor: "system".into(),
+};
+
+let permit = security.authorize(&action)?;
+assert!(permit.granted); // System always authorized
+```
+
+### Resource-Based Authorization
+
+```rust
+use oneclaw_core::security::{DefaultSecurity, Action, ActionKind};
+
+let security = DefaultSecurity::production("/workspace");
+
+// Pair a device first
+let code = security.generate_pairing_code()?;
+let identity = security.verify_pairing_code(&code)?;
+
+// Workspace path - allowed
+let action = Action {
+    kind: ActionKind::Read,
+    resource: "/workspace/config.toml".into(),
+    actor: identity.device_id.clone(),
+};
+let permit = security.authorize(&action)?;
+assert!(permit.granted);
+
+// Outside workspace - denied
+let action = Action {
+    kind: ActionKind::Read,
+    resource: "/etc/passwd".into(),
+    actor: identity.device_id,
+};
+let permit = security.authorize(&action)?;
+assert!(!permit.granted); // PathGuard blocks access
+```
+
+### Command Execution
+
+```rust
+use oneclaw_core::security::{DefaultSecurity, Action, ActionKind};
+
+let security = DefaultSecurity::production("/workspace");
+
+// Pair device
+let code = security.generate_pairing_code()?;
+let identity = security.verify_pairing_code(&code)?;
+
+// Execute command
+let action = Action {
+    kind: ActionKind::Execute,
+    resource: "list-files".into(),
+    actor: identity.device_id,
+};
+let permit = security.authorize(&action)?;
+assert!(permit.granted);
+```
+
+### Network Access
+
+```rust
+use oneclaw_core::security::{DefaultSecurity, Action, ActionKind};
+
+let security = DefaultSecurity::production("/workspace");
+
+// Pair device
+let code = security.generate_pairing_code()?;
+let identity = security.verify_pairing_code(&code)?;
+
+// Network request
+let action = Action {
+    kind: ActionKind::Network,
+    resource: "https://api.example.com".into(),
+    actor: identity.device_id,
+};
+let permit = security.authorize(&action)?;
+assert!(permit.granted);
+```
+
+## Development vs Production
+
+### Development Mode
+
+```rust
+let security = DefaultSecurity::development("/workspace");
+// pairing_required = false
+// Any device can perform actions (except path violations)
+```
+
+- Pairing **not required**
+- Path validation **still enforced**
+- Useful for local development and testing
+
+### Production Mode
+
+```rust
+let security = DefaultSecurity::production("/workspace");
+// pairing_required = true
+// Unpaired devices are rejected
+```
+
+- Pairing **required** for all actions
+- Deny-by-default for unpaired devices
+- Full security enforcement
+
+## Best Practices
+
+1. **Always check permits**: Never assume authorization will succeed
+2. **Log denials**: Track denied actions for security auditing
+3. **Use specific resources**: Provide exact file paths or command names
+4. **Handle actor identity**: Ensure `actor` matches the paired device ID
+5. **Production mode for deployment**: Use `DefaultSecurity::production()` in production
+
+## See Also
+
+- [SecurityCore Trait](/api/security/traits) - Trait definition and implementations
+- [Device Pairing API](/api/security/pairing) - Pairing devices for authorization

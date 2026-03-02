@@ -1,0 +1,447 @@
+---
+title: Installation
+description: Complete installation and deployment guide for OneClaw on edge devices
+---
+
+# Installation
+
+This guide covers installing OneClaw on development machines and deploying to edge devices like Raspberry Pi and other ARM-based hardware.
+
+## Prerequisites
+
+### Development machine
+
+- **Rust toolchain:** Version 1.85 or later with edition 2024 support
+- **Build tools:** Standard C/C++ compiler toolchain
+- **Operating system:** Linux, macOS, or Windows (Linux/macOS recommended for edge deployment)
+
+### Target edge device
+
+- **Architecture:** ARM64 (aarch64), x86_64, or RISC-V
+- **RAM:** Minimum 512MB (OneClaw uses less than 5MB)
+- **Storage:** Minimum 50MB for binary and data
+- **Operating system:** Linux-based (Raspbian, Ubuntu, Alpine, etc.)
+
+<Info>
+OneClaw is optimized for Raspberry Pi 4+ but runs on any ARM64 or x86_64 Linux system.
+</Info>
+
+## Install Rust
+
+If you don't have Rust installed:
+
+<CodeGroup>
+```bash Linux/macOS
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source $HOME/.cargo/env
+```
+
+```bash Windows
+# Download and run rustup-init.exe from:
+# https://rustup.rs/
+```
+</CodeGroup>
+
+Verify installation:
+
+```bash
+rustc --version
+# Should show: rustc 1.85.0 or later
+```
+
+<Note>
+OneClaw requires Rust 1.85+ for edition 2024 features. Update with `rustup update` if needed.
+</Note>
+
+## Build from source
+
+<Steps>
+  <Step title="Clone repository">
+    ```bash
+    git clone https://github.com/nicekid1/oneclaw
+    cd oneclaw
+    ```
+  </Step>
+
+  <Step title="Build release binary">
+    ```bash
+    cargo build --release
+    ```
+    
+    The optimized binary will be at `target/release/oneclaw-core` (~3.4MB).
+    
+    <Info>
+    First build downloads and compiles all dependencies. Subsequent builds are much faster.
+    </Info>
+  </Step>
+
+  <Step title="Run tests (optional)">
+    Verify the build with the test suite:
+    
+    ```bash
+    cargo test --workspace
+    ```
+    
+    All 550+ tests should pass.
+  </Step>
+
+  <Step title="Run locally">
+    ```bash
+    cargo run --release -p oneclaw-core
+    ```
+  </Step>
+</Steps>
+
+## Cross-compile for edge devices
+
+To deploy OneClaw on ARM devices like Raspberry Pi, cross-compile on your development machine.
+
+### Option A: Using cross (recommended)
+
+`cross` provides Docker-based cross-compilation with zero configuration:
+
+<Steps>
+  <Step title="Install cross">
+    ```bash
+    cargo install cross --git https://github.com/cross-rs/cross
+    ```
+  </Step>
+
+  <Step title="Run build script">
+    OneClaw includes a cross-compilation script:
+    
+    ```bash
+    ./scripts/cross-build.sh 1.0.0
+    ```
+    
+    This builds for ARM64 (aarch64-unknown-linux-gnu) and creates deployment artifacts.
+    
+    <Info>
+    The script automatically handles Docker, target setup, and binary stripping.
+    </Info>
+  </Step>
+
+  <Step title="Find binaries">
+    Cross-compiled binaries are at:
+    
+    ```
+    target/aarch64-unknown-linux-gnu/release/oneclaw-core
+    ```
+  </Step>
+</Steps>
+
+### Option B: Manual cross-compilation
+
+For manual control or custom targets:
+
+<Steps>
+  <Step title="Add target">
+    ```bash
+    rustup target add aarch64-unknown-linux-gnu
+    ```
+    
+    For other architectures:
+    - `armv7-unknown-linux-gnueabihf` (32-bit ARM)
+    - `x86_64-unknown-linux-gnu` (Intel/AMD 64-bit)
+    - `riscv64gc-unknown-linux-gnu` (RISC-V)
+  </Step>
+
+  <Step title="Install cross-compiler">
+    On Ubuntu/Debian:
+    
+    ```bash
+    sudo apt-get install gcc-aarch64-linux-gnu
+    ```
+    
+    On macOS:
+    
+    ```bash
+    brew install filosottile/musl-cross/musl-cross
+    ```
+  </Step>
+
+  <Step title="Build for target">
+    ```bash
+    cargo build --release --target aarch64-unknown-linux-gnu
+    ```
+  </Step>
+</Steps>
+
+<Warning>
+Manual cross-compilation requires matching the target system's libc version. Using `cross` avoids these compatibility issues.
+</Warning>
+
+## Deploy to Raspberry Pi
+
+Once you have a cross-compiled binary, deploy it to your edge device:
+
+<Steps>
+  <Step title="Copy files to device">
+    Transfer the binary and deployment files:
+    
+    ```bash
+    scp target/release/oneclaw-core pi@raspberrypi:~/
+    scp deploy/oneclaw.service deploy/install.sh pi@raspberrypi:~/
+    ```
+    
+    Replace `pi@raspberrypi` with your device's username and hostname.
+  </Step>
+
+  <Step title="SSH to device">
+    ```bash
+    ssh pi@raspberrypi
+    ```
+  </Step>
+
+  <Step title="Run installer">
+    The install script sets up OneClaw as a systemd service:
+    
+    ```bash
+    sudo ./install.sh 1.0.0
+    ```
+    
+    This:
+    - Copies binary to `/opt/oneclaw/bin/`
+    - Creates config directory at `/opt/oneclaw/config/`
+    - Installs systemd service
+    - Sets up proper permissions
+  </Step>
+
+  <Step title="Configure OneClaw">
+    Edit the configuration file:
+    
+    ```bash
+    sudo nano /opt/oneclaw/config/default.toml
+    ```
+    
+    Add your provider settings and API keys:
+    
+    ```toml
+    [security]
+    deny_by_default = true
+
+    [provider]
+    primary = "anthropic"
+    model = "claude-sonnet-4-20250514"
+    max_tokens = 1024
+    temperature = 0.3
+    fallback = ["ollama"]
+
+    [provider.keys]
+    anthropic = "your-api-key-here"
+    ```
+    
+    <Warning>
+    Secure your config file: `sudo chmod 600 /opt/oneclaw/config/default.toml`
+    </Warning>
+  </Step>
+
+  <Step title="Start the service">
+    ```bash
+    sudo systemctl start oneclaw
+    ```
+    
+    Enable auto-start on boot:
+    
+    ```bash
+    sudo systemctl enable oneclaw
+    ```
+  </Step>
+
+  <Step title="Verify deployment">
+    Check service status:
+    
+    ```bash
+    sudo systemctl status oneclaw
+    ```
+    
+    Watch live logs:
+    
+    ```bash
+    journalctl -u oneclaw -f
+    ```
+    
+    You should see:
+    
+    ```
+    OneClaw v1.0.0 starting...
+    Security layer initialized (deny-by-default: enabled)
+    Provider configured: anthropic
+    Runtime ready in 0.79us
+    ```
+  </Step>
+</Steps>
+
+## systemd service management
+
+Manage the OneClaw service on your edge device:
+
+<CodeGroup>
+```bash Start service
+sudo systemctl start oneclaw
+```
+
+```bash Stop service
+sudo systemctl stop oneclaw
+```
+
+```bash Restart service
+sudo systemctl restart oneclaw
+```
+
+```bash Check status
+sudo systemctl status oneclaw
+```
+
+```bash Enable auto-start
+sudo systemctl enable oneclaw
+```
+
+```bash Disable auto-start
+sudo systemctl disable oneclaw
+```
+
+```bash View logs
+journalctl -u oneclaw -f
+```
+
+```bash View recent logs
+journalctl -u oneclaw -n 100
+```
+</CodeGroup>
+
+## Platform-specific notes
+
+### Raspberry Pi
+
+- **Recommended model:** Pi 4 or later (4GB+ RAM preferred)
+- **OS:** Raspberry Pi OS (64-bit) or Ubuntu Server
+- **Storage:** Use SD card or SSD for better performance
+- **Networking:** Ensure stable internet for cloud LLM providers
+
+### Industrial gateways
+
+- OneClaw runs on standard x86_64 industrial PCs
+- Consider using Ollama locally to eliminate cloud dependencies
+- Use MQTT channel for sensor integration
+
+### Embedded ARM devices
+
+- Minimum 512MB RAM recommended
+- Test memory usage with `metrics` command
+- Consider disabling unused features to reduce footprint
+
+## Verify installation
+
+Test your OneClaw installation:
+
+<Steps>
+  <Step title="Check binary size">
+    ```bash
+    ls -lh target/release/oneclaw-core
+    # Should show ~3.4MB
+    ```
+  </Step>
+
+  <Step title="Run health check">
+    After starting OneClaw:
+    
+    ```
+    oneclaw> health
+    ```
+    
+    All layers should report healthy status.
+  </Step>
+
+  <Step title="Test LLM provider">
+    ```
+    oneclaw> ask What is 2+2?
+    ```
+    
+    Should receive response from configured LLM.
+  </Step>
+
+  <Step title="Check metrics">
+    ```
+    oneclaw> metrics
+    ```
+    
+    Verify boot time (sub-10ms) and memory usage (under 5MB).
+  </Step>
+</Steps>
+
+## Uninstall
+
+To remove OneClaw from an edge device:
+
+```bash
+sudo ./deploy/uninstall.sh
+```
+
+This stops the service, removes files from `/opt/oneclaw/`, and uninstalls the systemd unit.
+
+<Warning>
+Uninstalling deletes all configuration and stored data. Back up important data first.
+</Warning>
+
+## Troubleshooting
+
+### Build fails with "edition 2024 not found"
+
+Update Rust to version 1.85+:
+
+```bash
+rustup update stable
+```
+
+### Cross-compilation linker errors
+
+Use `cross` instead of manual cross-compilation:
+
+```bash
+cargo install cross --git https://github.com/cross-rs/cross
+./scripts/cross-build.sh 1.0.0
+```
+
+### Service fails to start on Pi
+
+Check logs for errors:
+
+```bash
+journalctl -u oneclaw -n 50
+```
+
+Common issues:
+- Missing or invalid config file
+- Incorrect file permissions
+- Missing API keys
+
+### Binary too large
+
+Ensure you're building in release mode:
+
+```bash
+cargo build --release
+```
+
+Release mode applies aggressive size optimizations (LTO, strip, opt-level=z).
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Configuration" icon="gear" href="/configuration">
+    Configure providers and features
+  </Card>
+  
+  <Card title="Architecture" icon="layer-group" href="/architecture">
+    Understand the 6-layer design
+  </Card>
+  
+  <Card title="Development" icon="code" href="/development">
+    Build custom tools and channels
+  </Card>
+  
+  <Card title="Deployment" icon="server" href="/deployment">
+    Production deployment guide
+  </Card>
+</CardGroup>

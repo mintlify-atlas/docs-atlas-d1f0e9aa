@@ -1,0 +1,301 @@
+---
+title: Embedding Provider Configuration
+description: Configure embedding providers for vector search and semantic memory
+---
+
+OneClaw supports semantic memory search via text embeddings. Embeddings convert text into dense vectors for similarity-based retrieval.
+
+## Supported Embedding Providers
+
+| Provider | ID | Default Model | Dimensions | API Key Required |
+|----------|----|--------------|-----------|-----------------|
+| Ollama (local) | `ollama` | `nomic-embed-text` | 768 | No |
+| OpenAI | `openai` | `text-embedding-3-small` | 1536 | Yes |
+
+## Basic Configuration
+
+Add an `[embedding]` section to enable vector search:
+
+```toml
+[embedding]
+provider = "ollama"
+model = "nomic-embed-text"
+```
+
+With embeddings enabled, the `remember` command automatically generates embeddings, and `recall` uses hybrid search (keyword + vector).
+
+## Ollama Embedding Provider
+
+Ollama runs locally and requires no API key:
+
+```toml
+[embedding]
+provider = "ollama"
+model = "nomic-embed-text"           # 768 dimensions (default)
+endpoint = "http://localhost:11434" # Default Ollama endpoint
+```
+
+### Supported Ollama Models
+
+| Model | Dimensions | Use Case |
+|-------|-----------|----------|
+| `nomic-embed-text` | 768 | General purpose (default) |
+| `all-minilm` | 384 | Fast, smaller embeddings |
+| `mxbai-embed-large` | 1024 | Higher quality |
+| `snowflake-arctic-embed` | 1024 | Multilingual |
+
+### Custom Ollama Endpoint
+
+For remote Ollama servers:
+
+```toml
+[embedding]
+provider = "ollama"
+model = "nomic-embed-text"
+endpoint = "http://192.168.1.100:11434"  # Remote Ollama server
+```
+
+## OpenAI Embedding Provider
+
+OpenAI embeddings require an API key:
+
+```toml
+[embedding]
+provider = "openai"
+model = "text-embedding-3-small"    # 1536 dimensions (default)
+endpoint = "https://api.openai.com" # Default OpenAI endpoint
+api_key = "sk-proj-..."             # Or use OPENAI_API_KEY env var
+```
+
+### Supported OpenAI Models
+
+| Model | Dimensions | Use Case |
+|-------|-----------|----------|
+| `text-embedding-3-small` | 1536 | Fast, cost-effective (default) |
+| `text-embedding-3-large` | 3072 | Higher quality, more expensive |
+| `text-embedding-ada-002` | 1536 | Legacy model |
+
+### API Key Configuration
+
+Provide API key via config or environment variable:
+
+```toml
+[embedding]
+provider = "openai"
+model = "text-embedding-3-small"
+api_key = "sk-proj-..."  # Explicit in config
+```
+
+Or use environment variable:
+
+```bash
+export OPENAI_API_KEY="sk-proj-..."
+```
+
+```toml
+[embedding]
+provider = "openai"
+model = "text-embedding-3-small"
+# api_key read from OPENAI_API_KEY env var
+```
+
+## When to Use Embeddings
+
+Embeddings are optional. OneClaw works without them using SQLite FTS5 (full-text search).
+
+### Use Embeddings When:
+
+- **Semantic search** matters ("hot weather" matches "warm sunny day")
+- You have **longer-term memory** needs (100+ items)
+- Queries use **natural language** (not exact keywords)
+- **Multilingual** queries and memory items
+
+### Skip Embeddings When:
+
+- Memory is small (under 50 items)
+- Queries are keyword-based ("temperature sensor 3")
+- Edge device with limited resources
+- Embedding service unavailable
+
+## Hybrid Search (FTS + Vector)
+
+When embeddings are configured, `recall` uses **RRF (Reciprocal Rank Fusion)** to combine:
+
+1. **FTS5** keyword search (SQLite built-in)
+2. **Vector search** cosine similarity
+
+This gives best-of-both-worlds: exact matches + semantic similarity.
+
+### Example
+
+```bash
+remember "The living room temperature is 22.5°C"
+remember "Bedroom thermostat set to 20°C"
+remember "Kitchen lights are on"
+
+recall "how warm is the house?"  # Matches both temperature items
+```
+
+Output:
+
+```
+Found 2 matches:
+1. [0.87] The living room temperature is 22.5°C
+2. [0.75] Bedroom thermostat set to 20°C
+```
+
+Scores combine FTS + vector similarity.
+
+## Graceful Degradation
+
+If embedding provider is unavailable, OneClaw falls back to FTS-only:
+
+```
+Warning: Embedding provider unreachable, using FTS-only search
+```
+
+Memory operations continue working, but only keyword matching is available.
+
+## Vector Search Configuration
+
+Embeddings are stored alongside memory items in SQLite:
+
+```sql
+CREATE TABLE memories (
+  id INTEGER PRIMARY KEY,
+  content TEXT,
+  embedding BLOB,  -- Serialized vector
+  model TEXT       -- e.g., "ollama:nomic-embed-text"
+);
+```
+
+Vector search uses **cosine similarity**:
+
+```
+similarity = dot(query_vec, item_vec) / (||query_vec|| * ||item_vec||)
+```
+
+## Configuration Examples
+
+### Edge Device (Raspberry Pi)
+
+Local Ollama embedding:
+
+```toml
+[embedding]
+provider = "ollama"
+model = "nomic-embed-text"  # 768D, fast
+endpoint = "http://localhost:11434"
+```
+
+Requires Ollama running locally:
+
+```bash
+ollama pull nomic-embed-text
+ollama serve
+```
+
+### Cloud Deployment
+
+OpenAI embeddings (no local Ollama needed):
+
+```toml
+[embedding]
+provider = "openai"
+model = "text-embedding-3-small"
+api_key = "sk-proj-..."
+```
+
+### Multilingual Setup
+
+For multilingual memory (Vietnamese, English, etc.):
+
+```toml
+[embedding]
+provider = "ollama"
+model = "snowflake-arctic-embed"  # Good multilingual support
+endpoint = "http://localhost:11434"
+```
+
+### High-Quality Embeddings
+
+For maximum accuracy (at higher cost):
+
+```toml
+[embedding]
+provider = "openai"
+model = "text-embedding-3-large"  # 3072 dimensions
+api_key = "sk-proj-..."
+```
+
+## Timeout Configuration
+
+Embedding requests have a configurable timeout:
+
+```toml
+[embedding]
+provider = "ollama"
+model = "nomic-embed-text"
+timeout_secs = 30  # Default: 30 seconds
+```
+
+Increase for slow networks or large batches.
+
+## Checking Embedding Provider Status
+
+Use the `recall` command to verify embedding status:
+
+```bash
+recall "test query"
+```
+
+If embeddings are working:
+
+```
+Search: FTS + Vector (ollama:nomic-embed-text)
+Found 3 matches...
+```
+
+If embeddings are unavailable:
+
+```
+Search: FTS only (embedding provider unavailable)
+Found 3 matches...
+```
+
+## Performance Considerations
+
+### Embedding Generation Speed
+
+| Provider | Model | Speed (per text) |
+|----------|-------|------------------|
+| Ollama local | nomic-embed-text | ~50ms |
+| Ollama local | all-minilm | ~20ms |
+| OpenAI API | text-embedding-3-small | ~100-200ms |
+
+### Memory Usage
+
+| Model | Dimensions | Storage per item |
+|-------|-----------|------------------|
+| all-minilm | 384 | 1.5 KB |
+| nomic-embed-text | 768 | 3 KB |
+| text-embedding-3-small | 1536 | 6 KB |
+| text-embedding-3-large | 3072 | 12 KB |
+
+For 1,000 memory items:
+- 768D model: ~3 MB
+- 1536D model: ~6 MB
+- 3072D model: ~12 MB
+
+## No Configuration Required
+
+Embedding configuration is **optional**. OneClaw works perfectly fine without it:
+
+```toml
+# No [embedding] section — FTS-only memory search
+[provider]
+primary = "anthropic"
+model = "claude-sonnet-4-20250514"
+```
+
+Memory operations (`remember`, `recall`) work using SQLite FTS5 keyword search.

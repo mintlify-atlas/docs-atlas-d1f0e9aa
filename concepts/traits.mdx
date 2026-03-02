@@ -1,0 +1,562 @@
+---
+title: Trait-Driven Design
+description: Understanding OneClaw's trait-driven architecture and implementation philosophy
+---
+
+## Why Traits?
+
+OneClaw uses **traits as contracts** for each layer. This design decision provides several key benefits:
+
+<CardGroup cols={2}>
+  <Card title="Modularity" icon="cube">
+    Swap implementations without changing other layers
+  </Card>
+  <Card title="Testability" icon="flask">
+    Use noop implementations for isolated unit testing
+  </Card>
+  <Card title="Extensibility" icon="puzzle-piece">
+    Create custom implementations for domain-specific needs
+  </Card>
+  <Card title="Zero Dependencies" icon="feather">
+    Core traits have no external dependencies
+  </Card>
+</CardGroup>
+
+## The Trait Hierarchy
+
+Every layer follows the same pattern:
+
+```rust
+// 1. Define the trait (interface)
+pub trait LayerTrait: Send + Sync {
+    fn key_method(&self) -> Result<Output>;
+}
+
+// 2. Provide NoopImpl (for testing)
+pub struct NoopLayer;
+impl LayerTrait for NoopLayer { /* ... */ }
+
+// 3. Provide DefaultImpl (for production)
+pub struct DefaultLayer;
+impl LayerTrait for DefaultLayer { /* ... */ }
+
+// 4. Allow custom implementations
+pub struct CustomLayer;
+impl LayerTrait for CustomLayer { /* ... */ }
+```
+
+## Layer-by-Layer Trait Examples
+
+### L0: Security Trait
+
+From `security/traits.rs:75`:
+
+```rust
+pub trait SecurityCore: Send + Sync {
+    fn authorize(&self, action: &Action) -> Result<Permit>;
+    fn check_path(&self, path: &std::path::Path) -> Result<()>;
+    fn generate_pairing_code(&self) -> Result<String>;
+    fn verify_pairing_code(&self, code: &str) -> Result<Identity>;
+    fn list_devices(&self) -> Result<Vec<PairedDevice>>;
+    fn remove_device(&self, device_id_prefix: &str) -> Result<PairedDevice>;
+}
+```
+
+**Implementations**:
+- `NoopSecurity` (`security/traits.rs:96`): Always grants access
+- `DefaultSecurity` (`security/default.rs:19`): Production deny-by-default security
+
+### L1: Orchestrator Traits
+
+#### ModelRouter
+
+From `orchestrator/router.rs:36`:
+
+```rust
+pub trait ModelRouter: Send + Sync {
+    fn route(&self, complexity: Complexity) -> Result<ModelChoice>;
+}
+```
+
+**Implementations**:
+- `NoopRouter`: Returns placeholder
+- `DefaultRouter`: Maps complexity to provider/model
+
+#### ChainExecutor
+
+From `orchestrator/chain.rs:183`:
+
+```rust
+#[async_trait]
+pub trait ChainExecutor: Send + Sync {
+    async fn execute(
+        &self,
+        chain: &Chain,
+        initial_input: &str,
+        context: &ChainContext<'_>,
+    ) -> Result<ChainResult>;
+}
+```
+
+**Implementations**:
+- `NoopChainExecutor` (`orchestrator/chain.rs:189`): Returns input as output
+- `DefaultChainExecutor` (`orchestrator/chain.rs:217`): Executes steps sequentially
+
+#### ContextManager
+
+From `orchestrator/context.rs`:
+
+```rust
+pub trait ContextManager: Send + Sync {
+    fn build_context(&self, input: &str, memory: &dyn Memory) -> Result<String>;
+}
+```
+
+**Implementations**:
+- `NoopContextManager`: Returns input unchanged
+- `DefaultContextManager`: Enriches with memory and system state
+
+### L2: Memory Trait
+
+From `memory/traits.rs:110`:
+
+```rust
+pub trait Memory: Send + Sync {
+    fn store(&self, content: &str, meta: MemoryMeta) -> Result<String>;
+    fn get(&self, id: &str) -> Result<Option<MemoryEntry>>;
+    fn search(&self, query: &MemoryQuery) -> Result<Vec<MemoryEntry>>;
+    fn delete(&self, id: &str) -> Result<bool>;
+    fn count(&self) -> Result<usize>;
+    
+    // Optional: vector search capability
+    fn as_vector(&self) -> Option<&dyn VectorMemory> {
+        None
+    }
+}
+```
+
+**Implementations**:
+- `NoopMemory` (`memory/traits.rs:134`): In-memory Vec (test only)
+- `SqliteMemory` (`memory/sqlite.rs`): Production SQLite + FTS5 + vector
+
+### L3: Event Bus Trait
+
+From `event_bus/traits.rs:71`:
+
+```rust
+pub trait EventBus: Send + Sync {
+    fn publish(&self, event: Event) -> Result<()>;
+    fn subscribe(&self, topic_pattern: &str, handler: EventHandler) -> Result<String>;
+    fn unsubscribe(&self, subscription_id: &str) -> Result<bool>;
+    fn pending_count(&self) -> usize;
+    fn drain(&self) -> Result<usize>;
+    fn recent_events(&self, limit: usize) -> Result<Vec<Event>>;
+}
+```
+
+**Implementations**:
+- `NoopEventBus` (`event_bus/traits.rs:93`): Discards all events
+- `DefaultEventBus` (`event_bus/bus.rs`): Sync queue-based
+- `AsyncEventBus` (`event_bus/async_bus.rs`): Tokio broadcast (opt-in)
+
+### L4: Tool Trait
+
+From `tool/traits.rs:59`:
+
+```rust
+pub trait Tool: Send + Sync {
+    fn info(&self) -> ToolInfo;
+    fn execute(&self, params: &HashMap<String, String>) -> Result<ToolResult>;
+}
+```
+
+**Implementations**:
+- `NoopTool` (`tool/traits.rs:69`): Always succeeds
+- Built-in tools: `SystemInfoTool`, `FileWriteTool`, `NotifyTool` (from oneclaw-tools crate)
+
+### L5: Channel Trait
+
+From `channel/traits.rs:27`:
+
+```rust
+#[async_trait]
+pub trait Channel: Send + Sync {
+    fn name(&self) -> &str;
+    async fn receive(&self) -> Result<Option<IncomingMessage>>;
+    async fn send(&self, message: &OutgoingMessage) -> Result<()>;
+}
+```
+
+**Implementations**:
+- `NoopChannel` (`channel/traits.rs:38`): Discards sends, never receives
+- `CliChannel`, `TcpChannel`, `TelegramChannel`, `MqttChannel` (from oneclaw-channels crate)
+
+## Noop Implementations
+
+Every layer has a **Noop implementation** that does nothing (or minimal work). This serves several purposes:
+
+### 1. Testing Isolation
+
+Test a single layer without dependencies:
+
+```rust
+#[test]
+fn test_memory_store() {
+    let config = OneClawConfig::default_config();
+    let mut runtime = Runtime::with_defaults(config);
+    
+    // All layers are Noop except the one we're testing
+    runtime.memory = Box::new(SqliteMemory::new(":memory:").unwrap());
+    
+    let id = runtime.memory.store("test data", MemoryMeta::default()).unwrap();
+    let entry = runtime.memory.get(&id).unwrap().unwrap();
+    assert_eq!(entry.content, "test data");
+}
+```
+
+### 2. Graceful Degradation
+
+OneClaw can boot with **all Noop layers** for testing:
+
+From `runtime.rs:65`:
+
+```rust
+pub fn with_defaults(config: OneClawConfig) -> Self {
+    Self {
+        config,
+        security: Box::new(NoopSecurity),
+        router: Box::new(NoopRouter),
+        context_mgr: Box::new(NoopContextManager),
+        chain: Box::new(NoopChainExecutor::new()),
+        memory: Box::new(NoopMemory::new()),
+        event_bus: Box::new(NoopEventBus::new()),
+        // ...
+    }
+}
+```
+
+This runtime will boot successfully and respond to basic commands, even though it does nothing useful.
+
+### 3. Incremental Implementation
+
+When building a new vertical (domain-specific application), you can:
+
+1. Start with all Noop implementations
+2. Swap in real implementations one layer at a time
+3. Test each layer independently
+
+Example:
+
+```rust
+let mut runtime = Runtime::with_defaults(config);
+
+// Sprint 1: Add security
+runtime.security = Box::new(DefaultSecurity::production(workspace));
+
+// Sprint 2: Add memory
+runtime.memory = Box::new(SqliteMemory::new("data.db")?);
+
+// Sprint 3: Add LLM orchestration
+runtime.router = Box::new(DefaultRouter::from_config(&config.providers));
+runtime.provider = Some(Box::new(build_provider(&config)?));
+
+// Other layers remain Noop until needed
+```
+
+## Custom Implementations
+
+The trait system allows **domain-specific implementations** without modifying core code.
+
+### Example: Custom Security for Medical Devices
+
+```rust
+pub struct MedicalDeviceSecurity {
+    base: DefaultSecurity,
+    audit_log: AuditLogger,
+}
+
+impl SecurityCore for MedicalDeviceSecurity {
+    fn authorize(&self, action: &Action) -> Result<Permit> {
+        // Log all authorization attempts for compliance
+        self.audit_log.record(action)?;
+        
+        // Apply HIPAA-compliant rules
+        if action.resource.contains("phi/") {
+            return self.check_phi_access(action);
+        }
+        
+        // Fall back to default security
+        self.base.authorize(action)
+    }
+    
+    // ... other methods ...
+}
+```
+
+### Example: Custom Memory for Time-Series Data
+
+```rust
+pub struct TimeSeriesMemory {
+    timescale_db: TimescaleClient,
+}
+
+impl Memory for TimeSeriesMemory {
+    fn store(&self, content: &str, meta: MemoryMeta) -> Result<String> {
+        // Parse sensor data
+        let reading: SensorReading = serde_json::from_str(content)?;
+        
+        // Store in TimescaleDB with downsampling
+        self.timescale_db.insert_hypertable(
+            "sensor_readings",
+            &reading,
+            TimestampTz::now(),
+        )?;
+        
+        Ok(reading.id)
+    }
+    
+    fn search(&self, query: &MemoryQuery) -> Result<Vec<MemoryEntry>> {
+        // Use TimescaleDB's time-series functions
+        self.timescale_db.query_aggregated(
+            query.after.unwrap_or_else(|| Utc::now() - Duration::hours(24)),
+            query.before.unwrap_or_else(|| Utc::now()),
+            Interval::Minutes(5), // 5-minute buckets
+        )
+    }
+    
+    // ... other methods ...
+}
+```
+
+### Example: Custom Channel for WebSocket
+
+```rust
+pub struct WebSocketChannel {
+    socket: Arc<Mutex<WebSocket>>,
+}
+
+#[async_trait]
+impl Channel for WebSocketChannel {
+    fn name(&self) -> &str { "websocket" }
+    
+    async fn receive(&self) -> Result<Option<IncomingMessage>> {
+        let mut socket = self.socket.lock().await;
+        match socket.next().await {
+            Some(Ok(Message::Text(text))) => Ok(Some(IncomingMessage {
+                source: "ws-client".into(),
+                content: text,
+                timestamp: Utc::now(),
+            })),
+            _ => Ok(None),
+        }
+    }
+    
+    async fn send(&self, message: &OutgoingMessage) -> Result<()> {
+        let mut socket = self.socket.lock().await;
+        socket.send(Message::Text(message.content.clone())).await?;
+        Ok(())
+    }
+}
+```
+
+## Trait Object vs Generic
+
+OneClaw uses **trait objects** (`Box<dyn Trait>`) rather than generics for layer implementations.
+
+### Why Trait Objects?
+
+```rust
+// Runtime uses trait objects
+pub struct Runtime {
+    pub security: Box<dyn SecurityCore>,  // ✅ Can swap at runtime
+    pub memory: Box<dyn Memory>,          // ✅ Config-driven selection
+    // ...
+}
+```
+
+Vs. generics:
+
+```rust
+// Would require monomorphization
+pub struct Runtime<S: SecurityCore, M: Memory> {  // ❌ Type bloat
+    pub security: S,
+    pub memory: M,
+    // ...
+}
+```
+
+**Advantages of trait objects**:
+
+1. **Runtime selection**: Choose implementation based on config
+2. **Smaller binary**: One `Runtime` type instead of `Runtime<S1, M1, ...>`, `Runtime<S2, M2, ...>`, etc.
+3. **Simpler API**: Users don't need to specify type parameters
+
+**Disadvantages** (acceptable for OneClaw's use case):
+
+1. **Virtual dispatch overhead**: ~2ns per call (negligible)
+2. **Heap allocation**: Requires `Box<dyn>` (acceptable for long-lived objects)
+
+See `runtime.rs:29` for the full `Runtime` definition.
+
+## Registry Pattern
+
+OneClaw uses a **Registry** to resolve trait implementations from configuration.
+
+From `registry.rs`:
+
+```rust
+pub struct ResolvedTraits {
+    pub security: Box<dyn SecurityCore>,
+    pub router: Box<dyn ModelRouter>,
+    pub context_mgr: Box<dyn ContextManager>,
+    pub chain: Box<dyn ChainExecutor>,
+    pub memory: Box<dyn Memory>,
+    pub event_bus: Box<dyn EventBus>,
+    pub provider: Option<Box<dyn Provider>>,
+}
+
+impl Registry {
+    pub fn resolve(
+        config: &OneClawConfig,
+        workspace: impl Into<PathBuf>,
+    ) -> Result<ResolvedTraits> {
+        // Read config and instantiate appropriate implementations
+        let security = match config.security.backend.as_str() {
+            "default" => Box::new(DefaultSecurity::production(workspace)),
+            "noop" => Box::new(NoopSecurity),
+            _ => return Err(OneClawError::Config("Unknown security backend")),
+        };
+        
+        let memory = match config.memory.backend.as_str() {
+            "sqlite" => Box::new(SqliteMemory::new(&config.memory.path)?),
+            "noop" => Box::new(NoopMemory::new()),
+            _ => return Err(OneClawError::Config("Unknown memory backend")),
+        };
+        
+        // ... resolve other layers ...
+        
+        Ok(ResolvedTraits {
+            security,
+            memory,
+            // ...
+        })
+    }
+}
+```
+
+This allows configuration-driven assembly:
+
+```toml config/oneclaw.toml
+[security]
+backend = "default"  # or "noop" for testing
+
+[memory]
+backend = "sqlite"   # or "noop" for testing
+path = "data.db"
+```
+
+From `runtime.rs:112`, the runtime loads from config:
+
+```rust
+pub fn from_config(config: OneClawConfig, workspace: impl Into<PathBuf>) -> Result<Self> {
+    let traits = Registry::resolve(&config, workspace)?;
+    Ok(Self {
+        config,
+        security: traits.security,
+        router: traits.router,
+        // ...
+    })
+}
+```
+
+## Send + Sync Requirements
+
+All traits require `Send + Sync` for thread-safety:
+
+```rust
+pub trait SecurityCore: Send + Sync { /* ... */ }
+```
+
+**Why?**
+
+1. **Send**: Can be transferred across thread boundaries
+2. **Sync**: Can be accessed from multiple threads via `&self`
+
+This enables:
+- Tokio async runtime (moves futures across threads)
+- Shared access via `Arc<Runtime>`
+- Parallel event processing
+
+From `runtime.rs:857`, the event loop runs on the tokio runtime:
+
+```rust
+pub async fn run(&self, channel: &dyn Channel) -> Result<()> {
+    // Runtime must be Send + Sync to be used in async context
+    loop {
+        let message = channel.receive().await?;  // Await point
+        let response = self.process_message(&message).await;
+        channel.send(&response).await?;
+    }
+}
+```
+
+## Testing with Noop Traits
+
+From `runtime.rs:1097`:
+
+```rust
+#[tokio::test]
+async fn test_runtime_run_with_mock_channel() {
+    let config = OneClawConfig::default_config();
+    let runtime = Runtime::with_defaults(config);  // All Noop layers
+    
+    let channel = MockChannel::new(vec!["hello", "status", "exit"]);
+    runtime.run(&channel).await.unwrap();
+    
+    let outputs = channel.get_outputs();
+    assert!(outputs.len() >= 3);
+    assert!(outputs[0].contains("Offline mode")); // NoopProvider
+    assert!(outputs[1].contains("OneClaw Agent")); // status works
+}
+```
+
+## Design Principles Summary
+
+<AccordionGroup>
+  <Accordion title="1. Traits Define Contracts">
+    Each layer's trait specifies **what** it does, not **how**. Implementations provide the "how."
+  </Accordion>
+  
+  <Accordion title="2. Noop Implementations Always Exist">
+    Every trait has a minimal "do nothing" implementation for testing and graceful degradation.
+  </Accordion>
+  
+  <Accordion title="3. Default Implementations Are Production-Ready">
+    Default implementations provide full functionality for standard use cases.
+  </Accordion>
+  
+  <Accordion title="4. Custom Implementations Are Encouraged">
+    The trait system is designed for extension. Add domain-specific behavior without forking core.
+  </Accordion>
+  
+  <Accordion title="5. Configuration Over Hardcoding">
+    The Registry pattern allows runtime selection of implementations based on config.
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Layer Details" icon="layer-group" href="/concepts/layers">
+    Deep dive into each layer's trait
+  </Card>
+  <Card title="Security Model" icon="shield" href="/concepts/security">
+    SecurityCore trait in depth
+  </Card>
+  <Card title="Building Verticals" icon="building" href="/guides/building-verticals">
+    Create domain-specific applications
+  </Card>
+  <Card title="Testing Guide" icon="flask" href="/guides/testing">
+    Using Noop traits for testing
+  </Card>
+</CardGroup>

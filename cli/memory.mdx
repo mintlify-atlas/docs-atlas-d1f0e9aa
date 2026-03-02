@@ -1,0 +1,200 @@
+---
+title: Memory Commands
+description: Store and search persistent agent memory with hybrid FTS5 + vector search
+---
+
+## remember
+
+Store text in persistent memory with automatic embedding (if configured).
+
+**Usage:**
+```
+remember <text>
+```
+
+**Example:**
+```
+> remember The greenhouse temperature threshold is 28°C
+Remembered (with embedding). (ID: a3f8c2d1, total memories: 43)
+```
+
+**Security:** Requires `memory:write` authorization
+
+**Behavior:**
+1. **With embedding provider configured:**
+   - Generates vector embedding via Ollama/OpenAI
+   - Stores text + embedding in SQLite (dual-indexed)
+   - Enables semantic search via `recall`
+
+2. **Without embedding provider:**
+   - Stores text with FTS5 keyword indexing only
+   - Graceful fallback (zero config required)
+
+**Example (no embedding):**
+```
+> remember Sensor A1 calibrated on 2026-03-01
+Remembered. (ID: b7e4f931, total memories: 44)
+```
+
+**Storage:**
+- Backend: SQLite (default) or NoopMemory
+- Auto-generates UUID for each entry
+- Timestamps with creation time
+- Metadata support (tags, source, etc.)
+
+## recall
+
+Search memory using hybrid FTS5 + vector similarity with RRF fusion.
+
+**Usage:**
+```
+recall <query>
+```
+
+**Example (hybrid search):**
+```
+> recall greenhouse temperature
+Found 3 memories:
+  1. [score:0.87] [2026-03-02 14:15] The greenhouse temperature threshold is 28°C
+  2. [score:0.72] [2026-03-01 09:30] Temperature sensor installed in greenhouse zone B
+  3. [score:0.68] [2026-02-28 16:45] Automated cooling activates at 27°C
+```
+
+**Example (FTS-only fallback):**
+```
+> recall sensor calibration
+Found 2 memories:
+  1. [2026-03-01 10:20] Sensor A1 calibrated on 2026-03-01
+  2. [2026-02-25 14:00] Annual sensor calibration schedule: March 1st
+```
+
+**Security:** Requires `memory:read` authorization
+
+**Search Modes:**
+
+### Hybrid Search (FTS5 + Vector + RRF)
+
+When embedding provider is configured:
+
+1. **FTS5 keyword search:** Traditional full-text search on indexed tokens
+2. **Vector similarity:** Cosine similarity between query embedding and stored embeddings
+3. **RRF fusion:** Reciprocal Rank Fusion combines both rankings
+
+**Benefits:**
+- Finds semantically similar content even with different wording
+- Balances keyword precision with semantic recall
+- Robust to synonyms and paraphrasing
+
+**Example:**
+```
+Query: "heat management"
+Matches: "temperature threshold", "cooling system", "thermal control"
+(no exact keyword overlap, matched via semantic similarity)
+```
+
+### FTS-Only Search
+
+When no embedding provider configured:
+
+- Pure SQLite FTS5 keyword matching
+- Fast, lightweight, zero external dependencies
+- Graceful degradation (no errors)
+
+**Limits:**
+- Default: 5 results
+- Sorted by relevance (hybrid score or FTS rank)
+
+**No Results:**
+```
+> recall nonexistent query
+No memories found.
+```
+
+## Memory Search in LLM Pipeline
+
+When you send queries to the LLM (via `ask` or free-form text), OneClaw automatically:
+
+1. Searches memory for relevant context (top 5 results)
+2. Injects matches into LLM prompt as "Related data from memory"
+3. LLM incorporates stored knowledge into response
+
+**Example:**
+```
+> ask What's the temperature limit for the greenhouse?
+```
+
+**Internal prompt sent to LLM:**
+```
+Related data from memory:
+- [02/03 14:15] The greenhouse temperature threshold is 28°C
+- [01/03 09:30] Automated cooling activates at 27°C
+
+User question: What's the temperature limit for the greenhouse?
+```
+
+**LLM response:**
+```
+The greenhouse temperature threshold is 28°C. The automated cooling system 
+activates slightly earlier at 27°C to prevent overheating.
+```
+
+**Offline Mode:**
+
+If no LLM provider is configured, memory search still works:
+
+```
+> ask greenhouse temperature
+[Offline mode] No LLM provider configured.
+2 related entries found in memory.
+```
+
+## Embedding Configuration
+
+Enable vector search in `config/oneclaw.toml`:
+
+```toml
+[embedding]
+provider = "ollama"  # or "openai"
+model = "nomic-embed-text"  # 768 dimensions
+```
+
+**Ollama (local, offline-capable):**
+```toml
+[embedding]
+provider = "ollama"
+model = "nomic-embed-text"  # 768d
+url = "http://localhost:11434"
+```
+
+**OpenAI (cloud):**
+```toml
+[embedding]
+provider = "openai"
+model = "text-embedding-3-small"  # 1536d
+api_key = "sk-..."  # or set OPENAI_API_KEY env var
+```
+
+**Verify embedding status:**
+```
+> status
+...
+Embedding: nomic-embed-text (768d) — 38 embedded / 42 total
+...
+```
+
+## Memory Backend
+
+Default: SQLite with FTS5 + vector extension
+
+**Storage location:**
+- `workspace/oneclaw.db` (SQLite file)
+- Auto-created on first `remember`
+
+**Schema:**
+- `memories` table: id, content, created_at, metadata (JSON)
+- `memories_fts` FTS5 virtual table: keyword index
+- `memory_embeddings` table: id, embedding (BLOB), dimensions
+
+**Persistence:**
+- Survives runtime restarts
+- No data loss on clean shutdown

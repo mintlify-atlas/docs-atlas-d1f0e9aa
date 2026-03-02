@@ -1,0 +1,328 @@
+---
+title: Raspberry Pi Deployment
+description: Install and run OneClaw on Raspberry Pi devices
+---
+
+This guide walks through deploying OneClaw on Raspberry Pi devices, from cross-compilation to running as a systemd service.
+
+## Prerequisites
+
+### Development Machine
+
+- Rust 1.85+ with edition 2024 support
+- `cross` tool for cross-compilation (or manual ARM toolchain)
+- SSH access to target Raspberry Pi
+
+### Raspberry Pi
+
+- **Model**: Raspberry Pi 3, 4, 5, or Zero
+- **OS**: Raspberry Pi OS (64-bit recommended) or any Linux with systemd
+- **RAM**: 512 MB+ available
+- **Storage**: 200 MB+ free space
+
+## Installation Steps
+
+<Steps>
+  <Step title="Cross-compile the binary">
+    On your development machine, build the ARM binary:
+
+    ```bash
+    # Install cross tool (Docker-based, recommended)
+    cargo install cross --git https://github.com/cross-rs/cross
+
+    # Build for ARM64 (Raspberry Pi 4/5 64-bit)
+    ./scripts/cross-build.sh 1.6.0
+    ```
+
+    This creates binaries in the `release/` directory:
+    - `oneclaw-elderly-1.6.0-aarch64-unknown-linux-gnu` (Pi 4/5 64-bit)
+    - `oneclaw-elderly-1.6.0-armv7-unknown-linux-gnueabihf` (Pi 3/Zero 32-bit)
+
+    See [Cross-Compilation Guide](/deployment/cross-compile) for details.
+  </Step>
+
+  <Step title="Copy files to Raspberry Pi">
+    Use SCP to transfer the binary and deployment scripts:
+
+    ```bash
+    # Copy ARM64 binary (adjust architecture if using 32-bit Pi)
+    scp release/oneclaw-elderly-1.6.0-aarch64-unknown-linux-gnu pi@raspberrypi:~/
+
+    # Copy deployment files
+    scp deploy/oneclaw.service pi@raspberrypi:~/
+    scp deploy/install.sh pi@raspberrypi:~/
+    ```
+
+    **Tip**: Replace `raspberrypi` with your Pi's hostname or IP address.
+  </Step>
+
+  <Step title="SSH to Raspberry Pi">
+    Connect to your Raspberry Pi:
+
+    ```bash
+    ssh pi@raspberrypi
+    ```
+  </Step>
+
+  <Step title="Run the installer">
+    The installer creates directories, user account, and systemd service:
+
+    ```bash
+    # Make installer executable
+    chmod +x install.sh
+
+    # Run installer (detects architecture automatically)
+    sudo ./install.sh 1.6.0
+    ```
+
+    The installer:
+    - Creates `/opt/oneclaw/` directory structure
+    - Creates `oneclaw` system user
+    - Installs binary to `/opt/oneclaw/oneclaw-elderly`
+    - Creates default configuration
+    - Installs systemd service file
+  </Step>
+
+  <Step title="Configure OneClaw">
+    Edit the configuration file:
+
+    ```bash
+    sudo nano /opt/oneclaw/config/default.toml
+    ```
+
+    Key settings to configure:
+
+    ```toml
+    [security]
+    deny_by_default = true
+    pairing_required = true
+
+    [providers]
+    default = "ollama"  # or "openai", "anthropic", etc.
+
+    [providers.ollama]
+    url = "http://localhost:11434"
+    model = "llama3.2:1b"  # Lightweight model for Pi
+    ```
+
+    **For cloud providers**, set API keys as environment variables or in the config:
+
+    ```toml
+    [providers.openai]
+    base_url = "https://api.openai.com/v1"
+    model = "gpt-4o-mini"
+    api_key = "sk-..."  # Or use OPENAI_API_KEY env var
+    ```
+
+    See [Configuration Guide](/configuration) for all options.
+  </Step>
+
+  <Step title="Start the service">
+    Enable and start OneClaw:
+
+    ```bash
+    # Start immediately
+    sudo systemctl start oneclaw
+
+    # Enable on boot
+    sudo systemctl enable oneclaw
+    ```
+  </Step>
+
+  <Step title="Verify deployment">
+    Check service status:
+
+    ```bash
+    sudo systemctl status oneclaw
+    ```
+
+    Expected output:
+    ```
+    ● oneclaw.service - OneClaw AI Agent — Elderly Care Monitor
+       Loaded: loaded (/etc/systemd/system/oneclaw.service; enabled)
+       Active: active (running) since ...
+    ```
+
+    Watch live logs:
+
+    ```bash
+    journalctl -u oneclaw -f
+    ```
+
+    You should see initialization logs:
+    ```
+    [INFO] OneClaw v1.6.0 starting...
+    [INFO] Security: deny-by-default enabled
+    [INFO] Provider: ollama (llama3.2:1b)
+    [INFO] Memory backend: sqlite (data/oneclaw.db)
+    [INFO] Ready
+    ```
+  </Step>
+</Steps>
+
+## Service Management
+
+Common systemd commands:
+
+```bash
+# Start service
+sudo systemctl start oneclaw
+
+# Stop service
+sudo systemctl stop oneclaw
+
+# Restart service
+sudo systemctl restart oneclaw
+
+# View status
+sudo systemctl status oneclaw
+
+# Enable on boot
+sudo systemctl enable oneclaw
+
+# Disable on boot
+sudo systemctl disable oneclaw
+
+# View logs (live)
+journalctl -u oneclaw -f
+
+# View logs (last 100 lines)
+journalctl -u oneclaw -n 100
+```
+
+See [systemd Service Guide](/deployment/systemd) for details.
+
+## Troubleshooting
+
+### Binary Not Found
+
+If the installer reports "Binary not found":
+
+1. Verify the binary was copied: `ls -lh ~/oneclaw-elderly-*`
+2. Check architecture matches: `uname -m` (should be `aarch64` or `armv7l`)
+3. Rename if needed: `mv oneclaw-elderly-1.6.0-aarch64-unknown-linux-gnu oneclaw-elderly`
+
+### Permission Denied
+
+If you see permission errors:
+
+```bash
+# Ensure installer is executable
+chmod +x install.sh
+
+# Run with sudo
+sudo ./install.sh 1.6.0
+```
+
+### Service Fails to Start
+
+Check logs for errors:
+
+```bash
+journalctl -u oneclaw -n 50
+```
+
+Common issues:
+- **Config syntax error**: Check `/opt/oneclaw/config/default.toml` syntax
+- **Missing API key**: Set provider API key in config or environment
+- **Port conflict**: Ensure MQTT/TCP ports are available
+
+### Out of Memory
+
+The service limits RAM to 128 MB. If you see OOM errors:
+
+1. Use a smaller LLM model (e.g., `llama3.2:1b` instead of larger models)
+2. Reduce memory limit in `/etc/systemd/system/oneclaw.service`:
+   ```ini
+   MemoryMax=256M  # Increase if RAM available
+   ```
+3. Reload systemd: `sudo systemctl daemon-reload && sudo systemctl restart oneclaw`
+
+## Performance Tips
+
+### Use Local LLMs
+
+For best latency on Pi, run Ollama locally:
+
+```bash
+# Install Ollama on Pi
+curl -fsSL https://ollama.ai/install.sh | sh
+
+# Pull lightweight model
+ollama pull llama3.2:1b
+```
+
+### Optimize Disk I/O
+
+Use a high-quality SD card or USB SSD for better database performance.
+
+### Monitor Resources
+
+Watch CPU and memory usage:
+
+```bash
+sudo systemctl status oneclaw
+```
+
+Shows resource usage:
+```
+Memory: 45.2M (limit: 128.0M)
+CPU: 850ms
+```
+
+## Updating OneClaw
+
+To update to a new version:
+
+<Steps>
+  <Step title="Build new binary">
+    On your development machine:
+    ```bash
+    ./scripts/cross-build.sh 1.7.0
+    ```
+  </Step>
+
+  <Step title="Copy to Pi">
+    ```bash
+    scp release/oneclaw-elderly-1.7.0-aarch64-unknown-linux-gnu pi@raspberrypi:~/
+    ```
+  </Step>
+
+  <Step title="Reinstall">
+    On the Pi:
+    ```bash
+    sudo ./install.sh 1.7.0
+    ```
+    
+    **Note**: The installer preserves your existing configuration.
+  </Step>
+</Steps>
+
+## Uninstalling
+
+To completely remove OneClaw:
+
+```bash
+sudo ./deploy/uninstall.sh
+```
+
+This removes:
+- Systemd service
+- `/opt/oneclaw/` directory (including all data)
+- `oneclaw` system user
+
+**Warning**: This deletes all agent memory and configuration. Back up `/opt/oneclaw/data/` if needed.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="systemd Configuration" icon="server" href="/deployment/systemd">
+    Customize service settings and resource limits
+  </Card>
+  <Card title="MQTT Integration" icon="signal-stream" href="/channels/mqtt">
+    Connect sensors via MQTT broker
+  </Card>
+  <Card title="Telegram Alerts" icon="telegram" href="/channels/telegram">
+    Receive notifications on your phone
+  </Card>
+</CardGroup>

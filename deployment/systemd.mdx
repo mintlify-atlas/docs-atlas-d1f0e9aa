@@ -1,0 +1,487 @@
+---
+title: systemd Service Configuration
+description: Run OneClaw as a systemd service with automatic restart and resource limits
+---
+
+OneClaw includes a production-ready systemd service file for running as a background daemon on edge devices.
+
+## Service File
+
+The systemd unit file is located at `deploy/oneclaw.service`:
+
+```ini
+[Unit]
+Description=OneClaw AI Agent — Elderly Care Monitor
+After=network.target mosquitto.service
+Wants=network.target
+
+[Service]
+Type=simple
+User=oneclaw
+Group=oneclaw
+WorkingDirectory=/opt/oneclaw
+ExecStart=/opt/oneclaw/oneclaw-elderly
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# Security hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/opt/oneclaw
+PrivateTmp=yes
+
+# Resource limits (edge device friendly)
+MemoryMax=128M
+CPUQuota=50%
+
+# Environment
+Environment=RUST_LOG=info
+Environment=ONECLAW_WORKSPACE=/opt/oneclaw
+
+[Install]
+WantedBy=multi-user.target
+```
+
+## Service Configuration
+
+### Unit Section
+
+```ini
+[Unit]
+Description=OneClaw AI Agent — Elderly Care Monitor
+After=network.target mosquitto.service
+Wants=network.target
+```
+
+- **Description**: Human-readable service name
+- **After**: Starts after network and MQTT broker (if installed)
+- **Wants**: Requires network availability
+
+### Service Section
+
+#### Execution Settings
+
+```ini
+Type=simple
+User=oneclaw
+Group=oneclaw
+WorkingDirectory=/opt/oneclaw
+ExecStart=/opt/oneclaw/oneclaw-elderly
+```
+
+- **Type=simple**: Single long-running process (not forking)
+- **User/Group**: Runs as dedicated `oneclaw` user (not root)
+- **WorkingDirectory**: Base directory for config and data
+- **ExecStart**: Path to OneClaw binary
+
+#### Auto-Restart
+
+```ini
+Restart=always
+RestartSec=5
+```
+
+- **Restart=always**: Automatically restarts on crashes or errors
+- **RestartSec=5**: Waits 5 seconds before restarting (prevents tight restart loops)
+
+#### Logging
+
+```ini
+StandardOutput=journal
+StandardError=journal
+```
+
+Logs to systemd journal (viewable with `journalctl`).
+
+### Security Hardening
+
+```ini
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/opt/oneclaw
+PrivateTmp=yes
+```
+
+- **NoNewPrivileges**: Prevents privilege escalation
+- **ProtectSystem=strict**: Read-only filesystem except `/opt/oneclaw`
+- **ProtectHome**: Cannot access user home directories
+- **ReadWritePaths**: Only `/opt/oneclaw` is writable
+- **PrivateTmp**: Isolated `/tmp` directory
+
+### Resource Limits
+
+```ini
+MemoryMax=128M
+CPUQuota=50%
+```
+
+- **MemoryMax=128M**: Maximum 128 MB RAM (edge-friendly)
+- **CPUQuota=50%**: Maximum 50% of one CPU core
+
+These limits ensure OneClaw remains lightweight on shared devices.
+
+### Environment Variables
+
+```ini
+Environment=RUST_LOG=info
+Environment=ONECLAW_WORKSPACE=/opt/oneclaw
+```
+
+- **RUST_LOG**: Sets logging level (`trace`, `debug`, `info`, `warn`, `error`)
+- **ONECLAW_WORKSPACE**: Base directory for data and config
+
+## Installation Steps
+
+The `deploy/install.sh` script automates systemd setup.
+
+### Automated Installation
+
+<Steps>
+  <Step title="Copy deployment files">
+    ```bash
+    scp deploy/oneclaw.service pi@raspberrypi:~/
+    scp deploy/install.sh pi@raspberrypi:~/
+    ```
+  </Step>
+
+  <Step title="Run installer">
+    ```bash
+    ssh pi@raspberrypi
+    sudo ./install.sh 1.6.0
+    ```
+
+    The installer:
+    - Creates `/opt/oneclaw/` directories
+    - Creates `oneclaw` system user
+    - Copies service file to `/etc/systemd/system/oneclaw.service`
+    - Reloads systemd daemon
+  </Step>
+
+  <Step title="Enable and start">
+    ```bash
+    sudo systemctl enable oneclaw  # Start on boot
+    sudo systemctl start oneclaw   # Start now
+    ```
+  </Step>
+</Steps>
+
+### Manual Installation
+
+If installing manually:
+
+```bash
+# Copy service file
+sudo cp oneclaw.service /etc/systemd/system/
+
+# Reload systemd
+sudo systemctl daemon-reload
+
+# Enable on boot
+sudo systemctl enable oneclaw
+
+# Start service
+sudo systemctl start oneclaw
+```
+
+## Service Management Commands
+
+### Start/Stop/Restart
+
+```bash
+# Start service
+sudo systemctl start oneclaw
+
+# Stop service
+sudo systemctl stop oneclaw
+
+# Restart service (reload config changes)
+sudo systemctl restart oneclaw
+
+# Reload systemd after editing service file
+sudo systemctl daemon-reload
+```
+
+### Status and Health
+
+```bash
+# Check service status
+sudo systemctl status oneclaw
+```
+
+**Example output**:
+```
+● oneclaw.service - OneClaw AI Agent — Elderly Care Monitor
+     Loaded: loaded (/etc/systemd/system/oneclaw.service; enabled)
+     Active: active (running) since Mon 2026-03-02 10:15:32 UTC; 2h 15min ago
+   Main PID: 1234 (oneclaw-elderly)
+      Tasks: 8 (limit: 4915)
+     Memory: 45.2M (limit: 128.0M)
+        CPU: 1.450s
+     CGroup: /system.slice/oneclaw.service
+             └─1234 /opt/oneclaw/oneclaw-elderly
+```
+
+### Enable/Disable Auto-Start
+
+```bash
+# Enable on boot
+sudo systemctl enable oneclaw
+
+# Disable on boot
+sudo systemctl disable oneclaw
+
+# Check if enabled
+sudo systemctl is-enabled oneclaw
+```
+
+## Log Viewing
+
+OneClaw logs to systemd journal:
+
+### Live Logs (Tail)
+
+```bash
+# Follow logs in real-time
+journalctl -u oneclaw -f
+```
+
+**Example output**:
+```
+Mar 02 10:15:32 raspberrypi oneclaw-elderly[1234]: [INFO] OneClaw v1.6.0 starting...
+Mar 02 10:15:32 raspberrypi oneclaw-elderly[1234]: [INFO] Security: deny-by-default enabled
+Mar 02 10:15:32 raspberrypi oneclaw-elderly[1234]: [INFO] Provider: ollama (llama3.2:1b)
+Mar 02 10:15:32 raspberrypi oneclaw-elderly[1234]: [INFO] Memory backend: sqlite
+Mar 02 10:15:32 raspberrypi oneclaw-elderly[1234]: [INFO] Channel: MQTT connected
+Mar 02 10:15:32 raspberrypi oneclaw-elderly[1234]: [INFO] Ready
+```
+
+### Recent Logs
+
+```bash
+# Last 50 lines
+journalctl -u oneclaw -n 50
+
+# Last 100 lines
+journalctl -u oneclaw -n 100
+
+# Last hour
+journalctl -u oneclaw --since "1 hour ago"
+
+# Specific time range
+journalctl -u oneclaw --since "2026-03-02 10:00:00" --until "2026-03-02 12:00:00"
+```
+
+### Log Filtering
+
+```bash
+# Only errors
+journalctl -u oneclaw -p err
+
+# Only warnings and above
+journalctl -u oneclaw -p warning
+
+# Search for pattern
+journalctl -u oneclaw | grep "MQTT"
+```
+
+### Export Logs
+
+```bash
+# Save to file
+journalctl -u oneclaw > oneclaw.log
+
+# Last 24 hours to file
+journalctl -u oneclaw --since "24 hours ago" > oneclaw-24h.log
+```
+
+## Customizing the Service
+
+### Increase Resource Limits
+
+If your device has more resources:
+
+```bash
+# Edit service file
+sudo nano /etc/systemd/system/oneclaw.service
+```
+
+Change limits:
+```ini
+MemoryMax=256M   # Increase from 128M
+CPUQuota=100%    # Use full CPU core
+```
+
+Apply changes:
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart oneclaw
+```
+
+### Change Log Level
+
+For more verbose logging:
+
+```ini
+Environment=RUST_LOG=debug  # or trace for maximum verbosity
+```
+
+Options: `trace`, `debug`, `info`, `warn`, `error`
+
+### Add API Keys
+
+For cloud LLM providers:
+
+```ini
+Environment=ANTHROPIC_API_KEY=sk-ant-...
+Environment=OPENAI_API_KEY=sk-...
+Environment=TELEGRAM_BOT_TOKEN=123456:ABC...
+```
+
+**Security Note**: Alternatively, set these in `/opt/oneclaw/config/default.toml` to avoid exposing in service file.
+
+### Delay Startup
+
+Wait for other services:
+
+```ini
+[Unit]
+After=network.target mosquitto.service ollama.service
+```
+
+## Uninstall Procedure
+
+The `deploy/uninstall.sh` script removes OneClaw completely:
+
+```bash
+sudo ./deploy/uninstall.sh
+```
+
+### What It Does
+
+<Steps>
+  <Step title="Stop service">
+    ```bash
+    sudo systemctl stop oneclaw
+    ```
+  </Step>
+
+  <Step title="Disable auto-start">
+    ```bash
+    sudo systemctl disable oneclaw
+    ```
+  </Step>
+
+  <Step title="Remove service file">
+    ```bash
+    sudo rm /etc/systemd/system/oneclaw.service
+    sudo systemctl daemon-reload
+    ```
+  </Step>
+
+  <Step title="Delete installation directory">
+    ```bash
+    sudo rm -rf /opt/oneclaw
+    ```
+    
+    **Warning**: This deletes all data, config, and agent memory.
+  </Step>
+
+  <Step title="Remove user">
+    ```bash
+    sudo userdel oneclaw
+    ```
+  </Step>
+</Steps>
+
+### Manual Uninstall
+
+If uninstall script is unavailable:
+
+```bash
+# Stop and disable
+sudo systemctl stop oneclaw
+sudo systemctl disable oneclaw
+
+# Remove service file
+sudo rm /etc/systemd/system/oneclaw.service
+sudo systemctl daemon-reload
+
+# Backup data (optional)
+sudo tar -czf oneclaw-backup.tar.gz /opt/oneclaw/data
+
+# Remove installation
+sudo rm -rf /opt/oneclaw
+
+# Remove user
+sudo userdel oneclaw
+```
+
+## Troubleshooting
+
+### Service Won't Start
+
+**Check status**:
+```bash
+sudo systemctl status oneclaw
+```
+
+**Check logs**:
+```bash
+journalctl -u oneclaw -n 50
+```
+
+**Common issues**:
+- Binary missing: Verify `/opt/oneclaw/oneclaw-elderly` exists
+- Config syntax: Check `/opt/oneclaw/config/default.toml`
+- Permissions: Ensure `oneclaw` user owns `/opt/oneclaw`
+
+### Service Keeps Restarting
+
+**Check crash logs**:
+```bash
+journalctl -u oneclaw -p err
+```
+
+**Common causes**:
+- Missing API key
+- Port conflict (MQTT, TCP)
+- Database corruption (delete `/opt/oneclaw/data/oneclaw.db`)
+
+### Out of Memory
+
+**Symptoms**: Service killed by OOM killer
+
+**Solutions**:
+1. Use smaller LLM model
+2. Increase `MemoryMax` in service file
+3. Check for memory leaks: `journalctl -u oneclaw | grep -i memory`
+
+### High CPU Usage
+
+**Check current usage**:
+```bash
+sudo systemctl status oneclaw
+```
+
+**Solutions**:
+- Reduce `CPUQuota` to limit impact
+- Optimize LLM inference (use smaller model)
+- Check for runaway event loops in logs
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Configuration" icon="gear" href="/configuration">
+    Customize OneClaw behavior and integrations
+  </Card>
+  <Card title="MQTT Channel" icon="signal-stream" href="/channels/mqtt">
+    Connect IoT sensors and devices
+  </Card>
+  <Card title="Monitoring" icon="chart-line" href="/observability/metrics">
+    Track performance and health metrics
+  </Card>
+</CardGroup>

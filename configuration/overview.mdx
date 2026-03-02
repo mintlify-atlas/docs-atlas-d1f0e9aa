@@ -1,0 +1,176 @@
+---
+title: Configuration Overview
+description: Understanding OneClaw's TOML-based configuration system
+---
+
+OneClaw uses a TOML configuration file for all runtime settings. Configuration is designed for edge deployment: minimal, explicit, and reload-friendly.
+
+## Configuration Format
+
+OneClaw reads configuration from `config/default.toml` in the working directory:
+
+```toml
+[security]
+deny_by_default = true
+
+[provider]
+primary = "anthropic"
+model = "claude-sonnet-4-20250514"
+max_tokens = 1024
+temperature = 0.3
+fallback = ["ollama"]
+
+[provider.keys]
+# openai = "sk-..."
+# google = "AIza..."
+```
+
+## Configuration File Location
+
+OneClaw looks for configuration in the following order:
+
+1. `config/default.toml` (working directory)
+2. Built-in defaults if no file exists
+
+For edge deployments (systemd service), the config is installed at:
+
+```
+/opt/oneclaw/config/default.toml
+```
+
+## Environment Variables
+
+API keys can be provided via environment variables instead of config file:
+
+| Variable | Purpose |
+|----------|--------|
+| `ONECLAW_API_KEY` | Global API key (fallback for all providers) |
+| `ANTHROPIC_API_KEY` | Anthropic-specific API key |
+| `OPENAI_API_KEY` | OpenAI-specific API key |
+| `DEEPSEEK_API_KEY` | DeepSeek-specific API key |
+| `GROQ_API_KEY` | Groq-specific API key |
+| `GOOGLE_API_KEY` | Google/Gemini-specific API key |
+
+### Key Resolution Order
+
+1. Per-provider key from `[provider.keys]` table in TOML
+2. Global `api_key` field in `[provider]` section
+3. `ONECLAW_API_KEY` environment variable
+4. Provider-specific environment variable (e.g., `ANTHROPIC_API_KEY`)
+
+## Configuration Sections
+
+OneClaw configuration is organized into sections:
+
+### Security (`[security]`)
+
+Controls deny-by-default access, pairing, and rate limiting.
+
+See [Security Configuration](/configuration/security) for details.
+
+### Provider (`[provider]`)
+
+LLM provider selection, model configuration, and fallback chains.
+
+See [LLM Provider Configuration](/configuration/providers) for details.
+
+### Embedding (`[embedding]`)
+
+Optional embedding provider for vector search.
+
+See [Embedding Configuration](/configuration/embedding) for details.
+
+### Runtime (`[runtime]`)
+
+Agent name and logging level:
+
+```toml
+[runtime]
+name = "oneclaw"
+log_level = "info"  # debug, info, warn, error
+```
+
+### Memory (`[memory]`)
+
+Memory backend configuration (default: SQLite):
+
+```toml
+[memory]
+backend = "sqlite"
+db_path = "data/oneclaw.db"
+```
+
+## Configuration Reload
+
+OneClaw supports runtime configuration reloading without restart:
+
+```bash
+reload
+```
+
+The `reload` command checks for config file changes and reloads:
+
+- Provider settings (model, temperature, fallback chain)
+- Security settings (pairing, rate limits)
+- Memory backend configuration
+
+**Note:** Some settings (like security persistence path) require restart.
+
+## Minimal Configuration
+
+OneClaw works with zero configuration. Defaults are:
+
+- **Provider:** `anthropic` with `claude-sonnet-4-20250514`
+- **Security:** Deny-by-default enabled, pairing required
+- **Memory:** SQLite at `data/oneclaw.db`
+- **Channels:** CLI only
+
+API key must be provided via `ANTHROPIC_API_KEY` env var or config file.
+
+## Example: Production Edge Deployment
+
+Typical configuration for a Raspberry Pi smart home hub:
+
+```toml
+[security]
+deny_by_default = true
+pairing_required = true
+persist_pairing = true
+persist_path = "data/security.db"
+
+[runtime]
+name = "home-hub-01"
+log_level = "info"
+
+[provider]
+primary = "anthropic"
+model = "claude-haiku-4-5-20251001"  # Fast, cheap for home automation
+max_tokens = 512
+temperature = 0.2
+fallback = ["ollama"]  # Local fallback if API unavailable
+
+[provider.keys]
+anthropic = "sk-..."
+
+[embedding]
+provider = "ollama"
+model = "nomic-embed-text"
+
+[memory]
+backend = "sqlite"
+db_path = "/opt/oneclaw/data/oneclaw.db"
+```
+
+## Validation and Errors
+
+OneClaw validates configuration at startup:
+
+- Unknown sections are ignored (forward compatibility)
+- Missing required fields use defaults
+- Invalid values (e.g., negative numbers) cause startup failure
+
+Configuration errors are logged to stderr with clear messages:
+
+```
+Error: Failed to parse config: invalid value for max_tokens (must be > 0)
+```

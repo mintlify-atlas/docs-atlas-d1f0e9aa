@@ -1,0 +1,181 @@
+---
+title: "Channel Trait"
+description: "Layer 5 async communication interface for sending and receiving messages"
+---
+
+## Overview
+
+The `Channel` trait defines the core async communication interface for OneClaw's Layer 5. All channel implementations must implement this trait to provide unified message handling across different communication protocols.
+
+**Location:** `crates/oneclaw-core/src/channel/traits.rs`
+
+## Channel Trait
+
+```rust
+#[async_trait]
+pub trait Channel: Send + Sync {
+    fn name(&self) -> &str;
+    async fn receive(&self) -> Result<Option<IncomingMessage>>;
+    async fn send(&self, message: &OutgoingMessage) -> Result<()>;
+}
+```
+
+### Methods
+
+#### `name()`
+
+Returns the unique identifier for this channel instance.
+
+```rust
+fn name(&self) -> &str
+```
+
+**Returns:** String slice containing the channel name (e.g., "cli", "tcp", "telegram", "mqtt")
+
+#### `receive()`
+
+Receives the next incoming message from this channel (async, non-blocking).
+
+```rust
+async fn receive(&self) -> Result<Option<IncomingMessage>>
+```
+
+**Returns:**
+- `Ok(Some(IncomingMessage))` - A message was received
+- `Ok(None)` - No message currently available (caller should poll again later)
+- `Err(OneClawError)` - Channel error occurred
+
+**Behavior:**
+- Non-blocking: Returns immediately if no message is ready
+- Async: Can be awaited efficiently without blocking the runtime
+- Sequential polling: ChannelManager polls channels in order
+
+#### `send()`
+
+Sends an outgoing message through this channel (async).
+
+```rust
+async fn send(&self, message: &OutgoingMessage) -> Result<()>
+```
+
+**Parameters:**
+- `message: &OutgoingMessage` - The message to send
+
+**Returns:**
+- `Ok(())` - Message sent successfully
+- `Err(OneClawError)` - Send failed
+
+## Message Types
+
+### IncomingMessage
+
+Represents a message received from an external source.
+
+```rust
+#[derive(Debug, Clone)]
+pub struct IncomingMessage {
+    pub source: String,
+    pub content: String,
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+}
+```
+
+**Fields:**
+- `source` - Source identifier (e.g., "cli", "tcp:8080", "telegram:12345", "mqtt:sensors/temp")
+- `content` - Text content of the message
+- `timestamp` - UTC timestamp when the message was received
+
+### OutgoingMessage
+
+Represents a message to be sent to an external destination.
+
+```rust
+#[derive(Debug, Clone)]
+pub struct OutgoingMessage {
+    pub destination: String,
+    pub content: String,
+}
+```
+
+**Fields:**
+- `destination` - Destination identifier (channel-specific routing)
+- `content` - Text content of the message
+
+## Channel Lifecycle
+
+1. **Construction** - Channel is created and configured
+2. **Registration** - Channel is added to ChannelManager via `add_channel()`
+3. **Polling Loop** - ChannelManager repeatedly calls `receive()` on all channels
+4. **Message Handling** - First channel with a message wins (sequential polling)
+5. **Response Routing** - Responses sent back via `send()` using source/destination mapping
+
+## NoopChannel
+
+A no-operation channel that discards all sends and never receives messages.
+
+```rust
+pub struct NoopChannel;
+
+impl Channel for NoopChannel {
+    fn name(&self) -> &str { "noop" }
+    async fn receive(&self) -> Result<Option<IncomingMessage>> { Ok(None) }
+    async fn send(&self, _message: &OutgoingMessage) -> Result<()> { Ok(()) }
+}
+```
+
+**Use cases:**
+- Testing and development
+- Placeholder when no channels are configured
+- Disabling I/O during unit tests
+
+## Implementation Requirements
+
+### Thread Safety
+
+- `Send + Sync` - Channels must be safe to share across threads
+- Internal mutability via `Mutex` or similar for state management
+
+### Non-Blocking Design
+
+- `receive()` should return immediately if no message is ready
+- Use timeouts (1-100ms) for network operations
+- Buffer incoming messages for sequential delivery
+
+### Error Handling
+
+- Return `Ok(None)` for transient "no data" conditions
+- Return `Err()` for fatal errors (connection loss, invalid config)
+- Log warnings for recoverable errors (dropped messages, timeouts)
+
+## Example Implementation Pattern
+
+```rust
+use async_trait::async_trait;
+use oneclaw_core::channel::{Channel, IncomingMessage, OutgoingMessage};
+use oneclaw_core::error::Result;
+use tokio::sync::Mutex;
+
+pub struct MyChannel {
+    buffer: Mutex<Vec<IncomingMessage>>,
+}
+
+#[async_trait]
+impl Channel for MyChannel {
+    fn name(&self) -> &str { "my_channel" }
+    
+    async fn receive(&self) -> Result<Option<IncomingMessage>> {
+        let mut buffer = self.buffer.lock().await;
+        Ok(buffer.pop())
+    }
+    
+    async fn send(&self, msg: &OutgoingMessage) -> Result<()> {
+        // Send implementation
+        Ok(())
+    }
+}
+```
+
+## See Also
+
+- [ChannelManager](/api/channels/manager) - Multi-channel coordination
+- [Built-in Channels](/api/channels/implementations) - CLI, TCP, Telegram, MQTT implementations

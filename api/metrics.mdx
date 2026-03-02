@@ -1,0 +1,421 @@
+---
+title: Metrics
+description: Runtime metrics API for operational monitoring and telemetry
+---
+
+The `Metrics` struct provides thread-safe operational telemetry for monitoring OneClaw agent performance. All counters use `AtomicU64` for lock-free increments.
+
+## Struct Definition
+
+```rust
+pub struct Metrics {
+    pub messages_total: AtomicU64,
+    pub messages_secured: AtomicU64,
+    pub messages_denied: AtomicU64,
+    pub messages_rate_limited: AtomicU64,
+    pub llm_calls_total: AtomicU64,
+    pub llm_calls_failed: AtomicU64,
+    pub llm_tokens_total: AtomicU64,
+    pub llm_latency_total_ms: AtomicU64,
+    pub memory_stores: AtomicU64,
+    pub memory_searches: AtomicU64,
+    pub tool_calls_total: AtomicU64,
+    pub tool_calls_failed: AtomicU64,
+    pub events_published: AtomicU64,
+    pub events_processed: AtomicU64,
+    pub alerts_triggered: AtomicU64,
+    pub chains_executed: AtomicU64,
+    pub chain_steps_total: AtomicU64,
+    pub errors_total: AtomicU64,
+}
+```
+
+## Available Metrics
+
+### Message Metrics
+
+<ParamField path="messages_total" type="AtomicU64">
+  Total messages received across all channels
+</ParamField>
+
+<ParamField path="messages_secured" type="AtomicU64">
+  Messages that passed security authorization
+</ParamField>
+
+<ParamField path="messages_denied" type="AtomicU64">
+  Messages denied by security checks
+</ParamField>
+
+<ParamField path="messages_rate_limited" type="AtomicU64">
+  Messages rejected by rate limiter (default: 60/min)
+</ParamField>
+
+### LLM Metrics
+
+<ParamField path="llm_calls_total" type="AtomicU64">
+  Total LLM API calls made to providers
+</ParamField>
+
+<ParamField path="llm_calls_failed" type="AtomicU64">
+  LLM API calls that failed or timed out
+</ParamField>
+
+<ParamField path="llm_tokens_total" type="AtomicU64">
+  Total tokens consumed across all LLM calls (input + output)
+</ParamField>
+
+<ParamField path="llm_latency_total_ms" type="AtomicU64">
+  Cumulative LLM latency in milliseconds (use with llm_calls_total to calculate average)
+</ParamField>
+
+### Memory Metrics
+
+<ParamField path="memory_stores" type="AtomicU64">
+  Total memory store operations ("remember" command)
+</ParamField>
+
+<ParamField path="memory_searches" type="AtomicU64">
+  Total memory search operations ("recall" command, context retrieval)
+</ParamField>
+
+### Tool Metrics
+
+<ParamField path="tool_calls_total" type="AtomicU64">
+  Total tool execution calls
+</ParamField>
+
+<ParamField path="tool_calls_failed" type="AtomicU64">
+  Tool executions that failed or returned errors
+</ParamField>
+
+### Event Metrics
+
+<ParamField path="events_published" type="AtomicU64">
+  Total events published to the event bus
+</ParamField>
+
+<ParamField path="events_processed" type="AtomicU64">
+  Total events processed (drained) from the event bus
+</ParamField>
+
+<ParamField path="alerts_triggered" type="AtomicU64">
+  Total alerts triggered by event handlers
+</ParamField>
+
+### Chain Metrics
+
+<ParamField path="chains_executed" type="AtomicU64">
+  Total chains executed
+</ParamField>
+
+<ParamField path="chain_steps_total" type="AtomicU64">
+  Total chain steps executed across all chains
+</ParamField>
+
+### Error Metrics
+
+<ParamField path="errors_total" type="AtomicU64">
+  Total errors encountered across all operations
+</ParamField>
+
+## Methods
+
+### new
+
+Create a new metrics instance with all counters at zero.
+
+```rust
+pub fn new() -> Self
+```
+
+<ResponseField name="return" type="Self">
+  A new Metrics instance with all counters initialized to 0
+</ResponseField>
+
+**Example:**
+
+```rust
+use oneclaw_core::metrics::Metrics;
+
+let metrics = Metrics::new();
+assert_eq!(metrics.messages_total.load(Ordering::Relaxed), 0);
+```
+
+### inc
+
+Increment a counter by 1 (thread-safe).
+
+```rust
+pub fn inc(counter: &AtomicU64)
+```
+
+<ParamField path="counter" type="&AtomicU64" required>
+  The counter to increment
+</ParamField>
+
+**Example:**
+
+```rust
+Metrics::inc(&runtime.metrics.messages_total);
+Metrics::inc(&runtime.metrics.llm_calls_total);
+```
+
+### add
+
+Add a value to a counter (thread-safe).
+
+```rust
+pub fn add(counter: &AtomicU64, value: u64)
+```
+
+<ParamField path="counter" type="&AtomicU64" required>
+  The counter to increment
+</ParamField>
+
+<ParamField path="value" type="u64" required>
+  The value to add
+</ParamField>
+
+**Example:**
+
+```rust
+Metrics::add(&runtime.metrics.llm_tokens_total, 150);
+Metrics::add(&runtime.metrics.llm_latency_total_ms, 250);
+```
+
+### uptime_secs
+
+Get uptime in seconds since boot.
+
+```rust
+pub fn uptime_secs(&self) -> u64
+```
+
+<ResponseField name="return" type="u64">
+  Uptime in seconds
+</ResponseField>
+
+**Example:**
+
+```rust
+let uptime = runtime.metrics.uptime_secs();
+println!("Agent uptime: {} seconds", uptime);
+```
+
+### uptime_display
+
+Get formatted uptime string (e.g., "2h 15m 30s").
+
+```rust
+pub fn uptime_display(&self) -> String
+```
+
+<ResponseField name="return" type="String">
+  Formatted uptime string
+</ResponseField>
+
+**Example:**
+
+```rust
+println!("Uptime: {}", runtime.metrics.uptime_display());
+// Output: "Uptime: 2h 15m 30s"
+```
+
+### avg_llm_latency_ms
+
+Calculate average LLM latency in milliseconds.
+
+```rust
+pub fn avg_llm_latency_ms(&self) -> u64
+```
+
+<ResponseField name="return" type="u64">
+  Average latency in ms, or 0 if no calls made
+</ResponseField>
+
+**Example:**
+
+```rust
+let avg_latency = runtime.metrics.avg_llm_latency_ms();
+println!("Average LLM latency: {}ms", avg_latency);
+```
+
+### report
+
+Generate a formatted report of all metrics.
+
+```rust
+pub fn report(&self) -> String
+```
+
+<ResponseField name="return" type="String">
+  Multi-line formatted report with all metric categories
+</ResponseField>
+
+**Example:**
+
+```rust
+println!("{}", runtime.metrics.report());
+```
+
+**Output:**
+
+```
+OneClaw Metrics:
+
+  Uptime: 2h 15m 30s
+
+  Messages:
+    Total: 145 | Secured: 142 | Denied: 3 | Rate-limited: 0
+
+  LLM:
+    Calls: 89 | Failed: 2 | Tokens: 15420 | Avg latency: 245ms
+
+  Memory:
+    Stores: 12 | Searches: 45
+
+  Tools:
+    Calls: 23 | Failed: 1
+
+  Events:
+    Published: 67 | Processed: 67 | Alerts: 5
+
+  Chains:
+    Executed: 8 | Steps: 24
+
+  Errors: 3
+```
+
+## Accessing Metrics
+
+Metrics are accessible through the `Runtime` struct:
+
+```rust
+let runtime = Runtime::from_config(config, workspace)?;
+
+// Access metrics
+println!("Total messages: {}", 
+    runtime.metrics.messages_total.load(Ordering::Relaxed));
+
+// Increment metrics
+Metrics::inc(&runtime.metrics.messages_total);
+
+// Generate report
+println!("{}", runtime.metrics.report());
+```
+
+## Performance Monitoring
+
+### Real-time Monitoring
+
+Spawn a background task to periodically report metrics:
+
+```rust
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::time::interval;
+
+let metrics = Arc::clone(&runtime.metrics);
+
+tokio::spawn(async move {
+    let mut ticker = interval(Duration::from_secs(60));
+    loop {
+        ticker.tick().await;
+        println!("--- Metrics Report ---");
+        println!("{}", metrics.report());
+    }
+});
+```
+
+### Alerting on Thresholds
+
+Monitor failure rates and trigger alerts:
+
+```rust
+use std::sync::atomic::Ordering;
+
+let total_calls = runtime.metrics.llm_calls_total.load(Ordering::Relaxed);
+let failed_calls = runtime.metrics.llm_calls_failed.load(Ordering::Relaxed);
+
+if total_calls > 0 {
+    let failure_rate = (failed_calls as f64 / total_calls as f64) * 100.0;
+    if failure_rate > 10.0 {
+        eprintln!("WARNING: LLM failure rate is {:.1}%", failure_rate);
+    }
+}
+```
+
+### Prometheus Export (Custom)
+
+Export metrics in Prometheus format:
+
+```rust
+use std::sync::atomic::Ordering;
+
+fn export_prometheus(metrics: &Metrics) -> String {
+    let o = Ordering::Relaxed;
+    format!(
+        "# HELP oneclaw_messages_total Total messages received\n\
+         # TYPE oneclaw_messages_total counter\n\
+         oneclaw_messages_total {}\n\
+         \n\
+         # HELP oneclaw_llm_calls_total Total LLM calls\n\
+         # TYPE oneclaw_llm_calls_total counter\n\
+         oneclaw_llm_calls_total {}\n\
+         \n\
+         # HELP oneclaw_llm_tokens_total Total LLM tokens\n\
+         # TYPE oneclaw_llm_tokens_total counter\n\
+         oneclaw_llm_tokens_total {}\n",
+        metrics.messages_total.load(o),
+        metrics.llm_calls_total.load(o),
+        metrics.llm_tokens_total.load(o),
+    )
+}
+```
+
+## Thread Safety
+
+All metrics use `AtomicU64` with `Ordering::Relaxed` for lock-free increments. This provides:
+
+- **Thread-safe updates** from any thread
+- **No mutex contention** or blocking
+- **Minimal performance overhead** (~1-2 CPU cycles per increment)
+- **Eventual consistency** (suitable for monitoring, not strict ordering)
+
+<Info>
+  Metrics use `Ordering::Relaxed` because strict ordering is not required for telemetry.
+  All increments are atomic, but the order in which different threads' updates become visible is not guaranteed.
+</Info>
+
+## Command-Line Access
+
+Users can view metrics via the built-in `metrics` command:
+
+```bash
+> metrics
+OneClaw Metrics:
+
+  Uptime: 2h 15m 30s
+
+  Messages:
+    Total: 145 | Secured: 142 | Denied: 3 | Rate-limited: 0
+  ...
+```
+
+Or view a subset via the `status` command:
+
+```bash
+> status
+OneClaw Agent v1.5.0
+
+  Uptime: 2h 15m 30s
+
+  Security: enforced
+    Memory: 234 entries (sqlite)
+    ...
+    Messages: 145 total (3 denied)
+    LLM: 89 calls (avg 245ms)
+
+  Type 'health' for detailed check
+  Type 'metrics' for full telemetry
+```

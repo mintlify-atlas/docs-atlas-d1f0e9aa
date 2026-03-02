@@ -1,0 +1,363 @@
+---
+title: Channel Commands
+description: Manage multi-channel I/O and device pairing
+---
+
+## channels
+
+List all active input/output channels.
+
+**Usage:**
+```
+channels
+```
+
+**Example Output:**
+```
+Active channels (3): cli, tcp, telegram
+```
+
+**Security:** Requires `system:channels` authorization
+
+**No Channels:**
+```
+Active channels: (none)
+```
+
+## Channel Types
+
+OneClaw supports multiple concurrent I/O channels:
+
+### CLI (Command-Line Interface)
+
+**Description:** Interactive terminal session (stdin/stdout)
+
+**Activation:** Default channel when running `cargo run --release -p oneclaw-core`
+
+**Use Cases:**
+- Local development
+- System administration
+- Debugging and testing
+
+**Example:**
+```bash
+cargo run --release -p oneclaw-core
+# CLI channel starts automatically
+> status
+OneClaw Agent v1.5.0
+...
+```
+
+### TCP (Network Socket)
+
+**Description:** TCP server listening on configurable port
+
+**Configuration:**
+```toml
+[channels]
+active = ["cli", "tcp"]
+
+[channels.tcp]
+port = 8080
+bind = "0.0.0.0"
+```
+
+**Usage:**
+```bash
+# Connect via netcat
+nc localhost 8080
+> status
+...
+
+# Connect via telnet
+telnet localhost 8080
+```
+
+**Use Cases:**
+- Remote access
+- Network automation
+- Multi-device deployments
+
+### Telegram
+
+**Description:** Telegram bot integration
+
+**Configuration:**
+```toml
+[channels]
+active = ["cli", "telegram"]
+
+[channels.telegram]
+bot_token = "123456789:ABCdefGHIjklMNOpqrsTUVwxyz"  # From @BotFather
+```
+
+**Usage:**
+1. Create bot via [@BotFather](https://t.me/BotFather)
+2. Get token and add to config
+3. Start OneClaw
+4. Message your bot on Telegram
+
+**Example:**
+```
+You: /status
+Bot: OneClaw Agent v1.5.0
+     Uptime: 1h 23m
+     ...
+
+You: What is edge AI?
+Bot: Edge AI is artificial intelligence processing...
+```
+
+**Use Cases:**
+- Mobile access
+- Notifications and alerts
+- Multi-user collaboration
+
+### MQTT
+
+**Description:** MQTT pub/sub for IoT integration
+
+**Configuration:**
+```toml
+[channels]
+active = ["cli", "mqtt"]
+
+[channels.mqtt]
+broker = "mqtt://localhost:1883"
+topic_command = "oneclaw/command"
+topic_response = "oneclaw/response"
+```
+
+**Usage:**
+```bash
+# Publish command
+mosquitto_pub -t oneclaw/command -m "status"
+
+# Subscribe to responses
+mosquitto_sub -t oneclaw/response
+# Output: OneClaw Agent v1.5.0...
+```
+
+**Use Cases:**
+- IoT device networks
+- Sensor data integration
+- Smart home automation
+
+## Multi-Channel Mode
+
+Run multiple channels simultaneously:
+
+**Configuration:**
+```toml
+[channels]
+active = ["cli", "tcp", "telegram", "mqtt"]
+```
+
+**Behavior:**
+- All channels receive same command set
+- Round-robin message polling
+- Responses routed to origin channel
+- Shared security context (pairing across channels)
+
+**Verify:**
+```
+> channels
+Active channels (4): cli, tcp, telegram, mqtt
+```
+
+**Alerts:**
+Alert messages (from `tool notify` or events) are pushed to **all active channels**:
+
+```
+> tool notify message="Temperature critical" priority=high
+[OK] notify: Event published: system/alert
+
+# Alert appears on:
+# - CLI output
+# - TCP connections
+# - Telegram messages
+# - MQTT publish to alert topic
+```
+
+## Device Pairing
+
+Secure device authentication using 6-digit codes.
+
+### pair
+
+Generate a pairing code valid for 5 minutes.
+
+**Usage:**
+```
+pair
+```
+
+**Example:**
+```
+> pair
+Pairing code: 582743 (valid 5 minutes)
+```
+
+**Security:** Always open (no authorization required)
+
+**Behavior:**
+- Generates random 6-digit code
+- Stores code + timestamp in security layer
+- Code expires after 5 minutes
+- Single-use (invalidated after verification)
+
+### verify
+
+Pair a device using the generated code.
+
+**Usage:**
+```
+verify <CODE>
+```
+
+**Example:**
+```
+> verify 582743
+Device paired successfully!
+  Device ID: 3f8a2c1d-9b4e-4a2f-8c3d-1e9f7a6b5c4d
+  Paired at: 2026-03-02 14:30:00 UTC
+  You can now interact with the agent.
+```
+
+**Security:** Always open (no authorization required)
+
+**Behavior:**
+1. Validate code against stored pairing requests
+2. Check expiration (5 minutes)
+3. Generate unique device ID (UUID)
+4. Store device identity in security layer
+5. Map channel source to device ID
+6. Grant access to protected commands
+
+**Error Cases:**
+
+**Invalid code:**
+```
+> verify 999999
+Pairing failed: Invalid or expired code
+```
+
+**Expired code:**
+```
+> verify 582743
+Pairing failed: Code expired (valid 5 minutes)
+```
+
+## Device Management
+
+### devices
+
+List all paired devices.
+
+**Usage:**
+```
+devices
+```
+
+**Example Output:**
+```
+Paired Devices (2):
+  3f8a2c1d | paired: 2026-03-02 14:30 | seen: 2026-03-02 15:45 | My Laptop
+  7b2e9f1a | paired: 2026-03-01 09:15 | seen: 2026-03-02 14:20 | Raspberry Pi 4
+```
+
+**Security:** Requires `security:devices` authorization
+
+**Fields:**
+- **ID:** First 8 chars of device UUID
+- **paired:** Initial pairing timestamp
+- **seen:** Last activity timestamp
+- **label:** Optional device label (set via API)
+
+**No Devices:**
+```
+No paired devices.
+```
+
+### unpair
+
+Remove a paired device (prefix match on device ID).
+
+**Usage:**
+```
+unpair <id_prefix>
+```
+
+**Example:**
+```
+> unpair 3f8a
+Device unpaired: 3f8a2c1d-9b4e-4a2f-8c3d-1e9f7a6b5c4d
+  Was paired since: 2026-03-02 14:30:00 UTC
+```
+
+**Security:** Requires `security:unpair` authorization
+
+**Behavior:**
+- Matches device ID by prefix (first N characters)
+- Removes device from security layer
+- Revokes all access permissions
+- Device must re-pair to regain access
+
+**Error:**
+```
+> unpair zzz
+Unpair failed: No device found matching prefix 'zzz'
+```
+
+## Channel Security Model
+
+When `deny_by_default = true`:
+
+**Always Open (all channels):**
+- `help`
+- `exit` / `quit`
+- `pair`
+- `verify CODE`
+
+**Requires Pairing (all other commands):**
+- Device must complete `pair` + `verify` flow
+- Each channel source tracked independently
+- Same device can pair multiple channels (CLI + Telegram, etc.)
+
+**Example Flow:**
+
+```
+# On CLI
+> pair
+Pairing code: 582743 (valid 5 minutes)
+
+# On Telegram
+You: verify 582743
+Bot: Device paired successfully!
+     Device ID: 3f8a2c1d...
+     You can now interact with the agent.
+
+You: status
+Bot: OneClaw Agent v1.5.0...
+
+# On CLI
+> devices
+Paired Devices (1):
+  3f8a2c1d | paired: 2026-03-02 14:30 | seen: 2026-03-02 14:31 | Telegram
+```
+
+## Round-Robin Polling
+
+In multi-channel mode, OneClaw polls channels in round-robin order:
+
+1. Check CLI for message
+2. Check TCP for message
+3. Check Telegram for message
+4. Check MQTT for message
+5. Repeat
+
+**Fairness:** No single channel can monopolize processing
+
+**Latency:** 50ms sleep between polls (configurable)
+
+**Shutdown:** All channels stopped gracefully on `exit`

@@ -1,0 +1,653 @@
+---
+title: The 6 Layers
+description: Detailed explanation of each layer in OneClaw's architecture
+---
+
+## Overview
+
+OneClaw's architecture consists of 6 layers, each with a specific responsibility. Every layer is defined as a Rust trait with at least two implementations: a **Noop** (for testing) and a **Default** (for production).
+
+<Note>
+Layers are numbered L0-L5, with L0 being the foundation (security) and L5 being the interface (channels).
+</Note>
+
+## Layer 0: Security (Immune System)
+
+<Accordion title="Purpose & Responsibilities">
+**Layer 0** enforces deny-by-default access control. Every action must be explicitly authorized.
+
+**Core trait**: `SecurityCore` (defined in `security/traits.rs:75`)
+
+### Key Methods
+
+```rust
+pub trait SecurityCore: Send + Sync {
+    /// Authorize an action. Deny-by-default.
+    fn authorize(&self, action: &Action) -> Result<Permit>;
+    
+    /// Check if a filesystem path is allowed
+    fn check_path(&self, path: &std::path::Path) -> Result<()>;
+    
+    /// Generate a one-time pairing code
+    fn generate_pairing_code(&self) -> Result<String>;
+    
+    /// Verify a pairing code and return device identity
+    fn verify_pairing_code(&self, code: &str) -> Result<Identity>;
+    
+    /// List all paired devices
+    fn list_devices(&self) -> Result<Vec<PairedDevice>>;
+}
+```
+
+### Action Types
+
+From `security/traits.rs:18`:
+
+- **Read**: Read access to a resource
+- **Write**: Write access to a resource
+- **Execute**: Execute a command or tool
+- **Network**: Network access
+- **PairDevice**: Pair a new device
+
+### Implementations
+
+**NoopSecurity** (`security/traits.rs:96`): Allows everything. **FOR TESTING ONLY.**
+
+**DefaultSecurity** (`security/default.rs:19`): Production implementation with:
+- Device pairing with 6-digit OTP codes
+- Filesystem scoping via `PathGuard`
+- Per-command authorization
+- Persistent device registry (SQLite)
+- Rate limiting integration
+</Accordion>
+
+<Accordion title="Device Pairing Flow">
+OneClaw uses a **pairing flow** inspired by IoT device onboarding:
+
+1. **Generate Code**: Agent generates 6-digit OTP (valid 5 minutes)
+   ```bash
+   > pair
+   Pairing code: 123456 (valid 5 minutes)
+   ```
+
+2. **Verify Code**: Client submits code to pair device
+   ```bash
+   > verify 123456
+   Device paired successfully!
+   Device ID: f3a2b1c0...
+   ```
+
+3. **Authorization**: Paired device can now execute commands
+
+From `security/default.rs:116`, verification is **atomic**:
+
+```rust
+fn verify_and_grant(&self, code: &str) -> Result<Identity> {
+    // Step 1: Atomic verify (marks code as used)
+    let identity = self.pairing.verify(code)?;
+    
+    // Step 2: Grant access (with poison recovery)
+    let mut devices = self.paired_devices.lock()
+        .unwrap_or_else(|e| e.into_inner());
+    devices.insert(identity.device_id.clone());
+    
+    // Step 3: Persist to SQLite
+    if let Some(ref store) = self.persistence {
+        store.store_device(&PairedDevice::from_identity(&identity))?;
+    }
+    
+    Ok(identity)
+}
+```
+</Accordion>
+
+<Accordion title="Authorization Example">
+From `runtime.rs:263`, every secured command checks authorization:
+
+```rust
+fn check_auth(
+    &self, 
+    kind: crate::security::ActionKind, 
+    resource: &str, 
+    actor: &str
+) -> Option<ProcessResult> {
+    let action = Action {
+        kind,
+        resource: resource.into(),
+        actor: actor.into(),
+    };
+    
+    match self.security.authorize(&action) {
+        Ok(permit) if permit.granted => None, // allowed
+        Ok(permit) => Some(ProcessResult::Response(
+            format!("Access denied: {:?} on '{}' — {}", 
+                action.kind, resource, permit.reason)
+        )),
+        Err(e) => Some(ProcessResult::Response(
+            format!("Security error: {}", e)
+        )),
+    }
+}
+```
+</Accordion>
+
+---
+
+## Layer 1: Orchestrator (Heart)
+
+<Accordion title="Purpose & Responsibilities">
+**Layer 1** is OneClaw's **competitive moat**. It orchestrates LLM interactions with:
+
+1. **Smart Routing** (`ModelRouter`): Choose the right model for the task
+2. **Chain Execution** (`ChainExecutor`): Multi-step reasoning pipelines
+3. **Context Management** (`ContextManager`): Prompt enrichment with memory
+
+Unlike other edge AI frameworks that treat LLMs as black boxes, OneClaw treats them as **a team of specialists requiring coordination**.
+</Accordion>
+
+<Accordion title="Smart Routing (ModelRouter)">
+Defined in `orchestrator/router.rs:36`:
+
+```rust
+pub trait ModelRouter: Send + Sync {
+    /// Select a provider and model for the given complexity level
+    fn route(&self, complexity: Complexity) -> Result<ModelChoice>;
+}
+```
+
+### Complexity Analysis
+
+From `orchestrator/router.rs:120`, complexity is determined by:
+
+1. **Keywords**: "emergency", "analyze", "compare" → Critical/Complex
+2. **Message Length**: Under 5 words → Simple, over 50 words → Medium/Complex
+3. **Memory Context**: Has relevant memories → Medium+
+4. **Explicit Hints**: Caller can override
+
+```rust
+pub enum Complexity {
+    Simple,    // Quick response, use cheapest/fastest model
+    Medium,    // Standard conversation, balanced model
+    Complex,   // Analysis needed, use best available model
+    Critical,  // Life/safety critical, use best model and verify
+}
+```
+
+### Routing Example
+
+```rust
+let router = DefaultRouter::new(vec![
+    (Complexity::Simple, "ollama".into(), "llama3.2:1b".into()),
+    (Complexity::Complex, "openai".into(), "gpt-4o".into()),
+]);
+
+let choice = router.route(Complexity::Complex)?;
+// → provider: "openai", model: "gpt-4o"
+```
+</Accordion>
+
+<Accordion title="Chain Execution (ChainExecutor)">
+**Multi-step reasoning** for complex tasks. Defined in `orchestrator/chain.rs:183`:
+
+```rust
+#[async_trait]
+pub trait ChainExecutor: Send + Sync {
+    async fn execute(
+        &self, 
+        chain: &Chain, 
+        initial_input: &str, 
+        context: &ChainContext<'_>
+    ) -> Result<ChainResult>;
+}
+```
+
+### Chain Steps
+
+From `orchestrator/chain.rs:16`:
+
+- **LlmCall**: Call LLM with prompt template
+- **MemorySearch**: Search memory for context
+- **Transform**: Format/transform output
+- **EmitEvent**: Publish event to bus
+- **ToolCall**: Execute a registered tool
+
+### Example Chain
+
+```rust
+let chain = Chain::new("health-analysis")
+    .add_step(ChainStep::memory_search(
+        "gather", 
+        "blood pressure readings", 
+        5
+    ))
+    .add_step(ChainStep::llm(
+        "analyze", 
+        "Analyze this data: {step_0}\nQuestion: {input}"
+    ))
+    .add_step(ChainStep::emit_event(
+        "alert", 
+        "health.analysis.complete"
+    ));
+
+let result = runtime.run_chain(&chain, "Is BP trending up?").await?;
+```
+
+From `orchestrator/chain.rs:229`, the `DefaultChainExecutor` runs steps sequentially, passing output forward with template substitution.
+</Accordion>
+
+<Accordion title="Context Management (ContextManager)">
+Enriches prompts with relevant context from memory and system state.
+
+**Future implementation** (currently uses inline context building in `runtime.rs:167`):
+
+```rust
+// Current approach in runtime.rs:186
+let memory_results = self.search_memory_context(content);
+let mut user_content = String::new();
+if !memory_strings.is_empty() {
+    user_content.push_str("Related data from memory:\n");
+    for mem in &memory_strings {
+        user_content.push_str(&format!("- {}\n", mem));
+    }
+}
+user_content.push_str(content);
+```
+</Accordion>
+
+---
+
+## Layer 2: Memory (Brain)
+
+<Accordion title="Purpose & Responsibilities">
+**Layer 2** provides persistent storage with **hybrid search**: keyword (FTS5) + semantic (vector) + temporal (B-tree).
+
+Core trait defined in `memory/traits.rs:110`:
+
+```rust
+pub trait Memory: Send + Sync {
+    /// Store content with metadata. Returns entry ID.
+    fn store(&self, content: &str, meta: MemoryMeta) -> Result<String>;
+    
+    /// Retrieve entry by ID
+    fn get(&self, id: &str) -> Result<Option<MemoryEntry>>;
+    
+    /// Search with multi-dimensional query
+    fn search(&self, query: &MemoryQuery) -> Result<Vec<MemoryEntry>>;
+    
+    /// Delete entry by ID
+    fn delete(&self, id: &str) -> Result<bool>;
+    
+    /// Count total entries
+    fn count(&self) -> Result<usize>;
+    
+    /// Upcast to VectorMemory if implementation supports vector search
+    fn as_vector(&self) -> Option<&dyn VectorMemory> { None }
+}
+```
+</Accordion>
+
+<Accordion title="Memory Entry Structure">
+From `memory/traits.rs:45`:
+
+```rust
+pub struct MemoryEntry {
+    pub id: String,
+    pub content: String,
+    pub meta: MemoryMeta,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+pub struct MemoryMeta {
+    pub tags: Vec<String>,           // e.g., ["sensor", "temperature"]
+    pub priority: Priority,          // Low | Medium | High | Critical
+    pub source: String,              // e.g., "device-001"
+}
+```
+</Accordion>
+
+<Accordion title="Hybrid Search">
+**SqliteMemory** implementation supports:
+
+1. **FTS5 Keyword Search**: Fast full-text search via SQLite FTS5
+2. **Vector Similarity**: Cosine similarity for semantic search
+3. **RRF Fusion**: Reciprocal Rank Fusion combines both scores
+
+From `runtime.rs:243`:
+
+```rust
+fn search_memory_context(&self, content: &str) -> Vec<MemoryEntry> {
+    // Try hybrid search first (FTS + vector)
+    if let Some(ref emb_provider) = self.embedding
+        && let Some(vector_mem) = self.memory.as_vector()
+        && let Ok(query_embedding) = emb_provider.embed(content)
+        && let Ok(results) = vector_mem.hybrid_search(content, &query_embedding, limit)
+    {
+        return results.into_iter().map(|r| r.entry).collect();
+    }
+    
+    // Fallback: FTS5 keyword search only
+    self.memory
+        .search(&MemoryQuery::new(content).with_limit(limit))
+        .unwrap_or_default()
+}
+```
+
+<Info>
+**Zero-config graceful degradation**: If no embedding provider is configured, memory falls back to FTS5-only search. No special configuration needed.
+</Info>
+</Accordion>
+
+<Accordion title="Query Builder">
+From `memory/traits.rs:77`:
+
+```rust
+let query = MemoryQuery::new("blood pressure")
+    .with_tags(vec!["health".into()])
+    .with_time_range(Some(yesterday), None)
+    .with_min_priority(Priority::High)
+    .with_limit(10);
+
+let results = memory.search(&query)?;
+```
+</Accordion>
+
+---
+
+## Layer 3: Event Bus (Nervous System)
+
+<Accordion title="Purpose & Responsibilities">
+**Layer 3** provides reactive pub/sub for real-time event processing. Defined in `event_bus/traits.rs:71`:
+
+```rust
+pub trait EventBus: Send + Sync {
+    /// Publish an event to the bus
+    fn publish(&self, event: Event) -> Result<()>;
+    
+    /// Subscribe a handler to a topic pattern
+    fn subscribe(&self, topic_pattern: &str, handler: EventHandler) -> Result<String>;
+    
+    /// Unsubscribe by subscription ID
+    fn unsubscribe(&self, subscription_id: &str) -> Result<bool>;
+    
+    /// Process all pending events (synchronous drain)
+    fn drain(&self) -> Result<usize>;
+}
+```
+</Accordion>
+
+<Accordion title="Event Structure">
+From `event_bus/traits.rs:10`:
+
+```rust
+pub struct Event {
+    pub id: String,
+    pub topic: String,              // "sensor.temperature", "alert.critical"
+    pub data: HashMap<String, String>,
+    pub source: String,
+    pub priority: EventPriority,    // Low | Normal | High | Critical
+    pub timestamp: DateTime<Utc>,
+}
+```
+
+Example:
+
+```rust
+let event = Event::new("sensor.temperature", "device-001")
+    .with_data("value", "42.5")
+    .with_data("unit", "celsius")
+    .with_priority(EventPriority::High);
+
+event_bus.publish(event)?;
+```
+</Accordion>
+
+<Accordion title="Sync vs Async Event Bus">
+OneClaw provides two implementations:
+
+### DefaultEventBus (Sync)
+
+From `event_bus/bus.rs`: Queue-based, processed via `drain()` calls.
+
+- **Use case**: Standard workloads where sub-second latency is acceptable
+- **Default**: Automatically used unless overridden
+
+### AsyncEventBus (Async)
+
+From `event_bus/async_bus.rs`: Tokio broadcast channel for sub-10ms latency.
+
+- **Use case**: Real-time sensor monitoring, critical alerts
+- **Opt-in**: Call `runtime.with_async_event_bus(capacity)`
+
+Example from `runtime.rs:150`:
+
+```rust
+let sender = runtime.with_async_event_bus(256);
+let mut rx = sender.subscribe();
+
+tokio::spawn(async move {
+    while let Ok(event) = rx.recv().await {
+        println!("Real-time event: {:?}", event);
+    }
+});
+```
+</Accordion>
+
+<Accordion title="Topic Pattern Matching">
+Supports prefix matching:
+
+```rust
+// Subscribe to all sensor events
+event_bus.subscribe("sensor.*", Box::new(|event| {
+    println!("Sensor: {}", event.topic);
+    None  // No response event
+}))?;
+
+// Matches: sensor.temperature, sensor.humidity, sensor.motion
+```
+</Accordion>
+
+---
+
+## Layer 4: Tool (Hands)
+
+<Accordion title="Purpose & Responsibilities">
+**Layer 4** provides sandboxed execution of external actions. Defined in `tool/traits.rs:59`:
+
+```rust
+pub trait Tool: Send + Sync {
+    /// Tool info for discovery/LLM function calling
+    fn info(&self) -> ToolInfo;
+    
+    /// Execute the tool with given parameters
+    fn execute(&self, params: &HashMap<String, String>) -> Result<ToolResult>;
+}
+```
+</Accordion>
+
+<Accordion title="Tool Definition">
+From `tool/traits.rs:18`:
+
+```rust
+pub struct ToolInfo {
+    pub name: String,
+    pub description: String,
+    pub params: Vec<ToolParam>,
+    pub category: String,  // "io", "network", "system", "notify"
+}
+
+pub struct ToolParam {
+    pub name: String,
+    pub description: String,
+    pub required: bool,
+}
+```
+</Accordion>
+
+<Accordion title="Tool Registry">
+From `tool/registry.rs`, the `ToolRegistry` manages tool lifecycle:
+
+```rust
+let mut registry = ToolRegistry::new();
+
+// Register tools
+registry.register(Box::new(SystemInfoTool::new()));
+registry.register(Box::new(FileWriteTool::new()));
+
+// Execute with security gating
+let mut params = HashMap::new();
+params.insert("message".into(), "Hello".into());
+
+let result = registry.execute(
+    "notify", 
+    &params, 
+    Some(event_bus)  // Optional: publish tool.executed event
+)?;
+```
+
+**Security**: Tools are executed AFTER authorization check in `runtime.rs:720`:
+
+```rust
+let resource = format!("tool:{}", tool_name);
+if let Some(denied) = self.check_auth(ActionKind::Execute, &resource, actor) {
+    return denied;
+}
+```
+</Accordion>
+
+<Accordion title="Built-in Tools">
+From `README.md:152`, OneClaw includes:
+
+- **system_info**: Get system metrics (CPU, memory, disk)
+- **file_write**: Write files (with path validation)
+- **notify**: Send notifications/alerts
+</Accordion>
+
+---
+
+## Layer 5: Channel (Ears & Mouth)
+
+<Accordion title="Purpose & Responsibilities">
+**Layer 5** handles multi-source I/O. Defined in `channel/traits.rs:27`:
+
+```rust
+#[async_trait]
+pub trait Channel: Send + Sync {
+    /// Return the name of this channel
+    fn name(&self) -> &str;
+    
+    /// Receive the next incoming message, if any (async)
+    async fn receive(&self) -> Result<Option<IncomingMessage>>;
+    
+    /// Send an outgoing message through this channel (async)
+    async fn send(&self, message: &OutgoingMessage) -> Result<()>;
+}
+```
+</Accordion>
+
+<Accordion title="Message Types">
+From `channel/traits.rs:8`:
+
+```rust
+pub struct IncomingMessage {
+    pub source: String,       // "user-123", "telegram:456", "mqtt:sensor-001"
+    pub content: String,
+    pub timestamp: DateTime<Utc>,
+}
+
+pub struct OutgoingMessage {
+    pub destination: String,  // Channel-specific routing
+    pub content: String,
+}
+```
+</Accordion>
+
+<Accordion title="Channel Manager">
+From `channel/manager.rs`, the `ChannelManager` multiplexes multiple channels:
+
+```rust
+let mut manager = ChannelManager::new();
+manager.add(Box::new(CliChannel::new()));
+manager.add(Box::new(TelegramChannel::new(bot_token)));
+manager.add(Box::new(MqttChannel::new(broker_url)));
+
+// Round-robin poll all channels
+runtime.run_multi(&manager).await?;
+```
+
+From `runtime.rs:969`, channels are polled in round-robin:
+
+```rust
+match manager.receive_any().await {
+    Ok(Some((channel_idx, message))) => {
+        // Process message
+        let response = self.process_message(&message).await;
+        // Send back through same channel
+        manager.send_to(channel_idx, &response).await?;
+    }
+    Ok(None) => tokio::time::sleep(Duration::from_millis(50)).await,
+    Err(e) => { /* handle error */ }
+}
+```
+</Accordion>
+
+<Accordion title="Built-in Channels">
+From `README.md:42`, OneClaw supports:
+
+- **CLI**: Interactive command-line interface
+- **TCP**: Network socket server
+- **Telegram**: Telegram bot API
+- **MQTT**: IoT message broker
+</Accordion>
+
+---
+
+## Layer Composition Example
+
+Here's how all layers work together when processing a user message:
+
+```rust
+// 1. L5: Receive message
+let message = channel.receive().await?;
+
+// 2. L0: Authorize action
+let permit = runtime.security.authorize(&Action {
+    kind: ActionKind::Execute,
+    resource: "llm",
+    actor: &device_id,
+})?;
+
+if !permit.granted {
+    return Err("Access denied");
+}
+
+// 3. L2: Search memory for context
+let context = runtime.memory.search(&MemoryQuery::new(&message.content))?;
+
+// 4. L1: Route to appropriate model
+let complexity = analyze_complexity(&message.content, !context.is_empty());
+let model_choice = runtime.router.route(complexity)?;
+
+// 5. L1: Execute LLM call with context
+let response = runtime.provider.chat(system_prompt, &enriched_prompt)?;
+
+// 6. L3: Publish event
+runtime.event_bus.publish(Event::new("llm.response", "runtime"))?;
+
+// 7. L5: Send response
+channel.send(&OutgoingMessage {
+    destination: message.source,
+    content: response,
+}).await?;
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Trait Philosophy" icon="puzzle-piece" href="/concepts/traits">
+    Why traits for each layer?
+  </Card>
+  <Card title="Security Model" icon="shield" href="/concepts/security">
+    Deep dive into Layer 0
+  </Card>
+</CardGroup>

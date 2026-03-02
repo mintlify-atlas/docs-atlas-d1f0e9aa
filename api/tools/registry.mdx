@@ -1,0 +1,261 @@
+---
+title: ToolRegistry
+description: Registry for managing and executing tools with parameter validation and security gating
+---
+
+## Overview
+
+The `ToolRegistry` manages all available tools in an OneClaw system. It provides tool registration, discovery, parameter validation, and secure execution with event emission.
+
+**Source**: `/home/daytona/workspace/source/crates/oneclaw-core/src/tool/registry.rs:14`
+
+## Security Model
+
+Before executing any tool, the registry performs:
+
+1. **Existence check**: Tool must be registered
+2. **Parameter validation**: All required parameters must be present
+3. **Event emission**: Execution results are published to the event bus
+
+## Struct Definition
+
+```rust
+pub struct ToolRegistry {
+    tools: HashMap<String, Box<dyn Tool>>,
+}
+```
+
+## Methods
+
+### new()
+
+Creates an empty tool registry.
+
+**Returns**: `ToolRegistry`
+
+**Usage**:
+```rust
+let mut registry = ToolRegistry::new();
+```
+
+### register()
+
+Registers a tool, making it available for execution.
+
+**Parameters**:
+- `tool`: `Box<dyn Tool>` - The tool implementation to register
+
+**Effects**: Logs the registration at INFO level.
+
+**Usage**:
+```rust
+registry.register(Box::new(SystemInfoTool::new()));
+registry.register(Box::new(FileWriteTool::new("/workspace")));
+registry.register(Box::new(NotifyTool::new()));
+```
+
+### list_tools()
+
+Returns metadata for all registered tools, suitable for LLM function calling.
+
+**Returns**: `Vec<ToolInfo>` - List of tool metadata
+
+**Usage**:
+```rust
+let tools = registry.list_tools();
+for tool in tools {
+    println!("Tool: {} - {}", tool.name, tool.description);
+    println!("  Category: {}", tool.category);
+    for param in tool.params {
+        let req = if param.required { "required" } else { "optional" };
+        println!("  - {} ({}): {}", param.name, req, param.description);
+    }
+}
+```
+
+### get_tool_info()
+
+Retrieves metadata for a specific tool by name.
+
+**Parameters**:
+- `name`: `&str` - The tool name
+
+**Returns**: `Option<ToolInfo>` - Tool metadata if found
+
+**Usage**:
+```rust
+if let Some(info) = registry.get_tool_info("system_info") {
+    println!("Found tool: {}", info.description);
+}
+```
+
+### execute()
+
+Executes a tool with parameter validation and event emission.
+
+**Parameters**:
+- `tool_name`: `&str` - Name of the tool to execute
+- `params`: `&HashMap<String, String>` - Parameter key-value pairs
+- `event_bus`: `Option<&dyn EventBus>` - Optional event bus for execution events
+
+**Returns**: `Result<ToolResult>` - Tool execution result or error
+
+**Errors**:
+- `OneClawError::Tool` - Tool not found or missing required parameters
+
+**Events Emitted** (if event_bus provided):
+- **Topic**: `tool.<tool_name>`
+- **Source**: `tool-registry`
+- **Data**:
+  - `tool`: Tool name
+  - `success`: "true" or "false"
+  - `output_len`: Length of output string
+- **Priority**: `High` for failures, `Normal` for success
+
+**Usage**:
+```rust
+use std::collections::HashMap;
+
+let mut params = HashMap::new();
+params.insert("section".to_string(), "os".to_string());
+
+let result = registry.execute(
+    "system_info",
+    &params,
+    Some(&event_bus)
+)?;
+
+if result.success {
+    println!("Output: {}", result.output);
+} else {
+    eprintln!("Error: {}", result.output);
+}
+```
+
+### count()
+
+Returns the number of registered tools.
+
+**Returns**: `usize`
+
+**Usage**:
+```rust
+println!("Registered tools: {}", registry.count());
+```
+
+## Validation Flow
+
+When `execute()` is called:
+
+1. **Tool lookup**: Verify tool exists in registry
+2. **Parameter validation**: Check all required parameters are present
+3. **Execution**: Call the tool's `execute()` method
+4. **Event emission**: Publish execution result to event bus
+5. **Return**: Return `ToolResult` to caller
+
+```rust
+// Step 1: Tool lookup
+let tool = self.tools.get(tool_name)
+    .ok_or_else(|| OneClawError::Tool(format!("Tool '{}' not found", tool_name)))?;
+
+// Step 2: Validate required params
+for param in &info.params {
+    if param.required && !params.contains_key(&param.name) {
+        return Err(OneClawError::Tool(
+            format!("Tool '{}' requires parameter '{}'", tool_name, param.name)
+        ));
+    }
+}
+
+// Step 3: Execute
+let result = tool.execute(params)?;
+
+// Step 4: Emit event
+if let Some(bus) = event_bus {
+    bus.publish(Event::new(format!("tool.{}", tool_name), "tool-registry")
+        .with_data("success", result.success.to_string()));
+}
+```
+
+## Discovery Pattern
+
+Tools can be discovered and introspected before execution:
+
+```rust
+// List all tools in a category
+let io_tools: Vec<_> = registry.list_tools()
+    .into_iter()
+    .filter(|t| t.category == "io")
+    .collect();
+
+// Check if a tool exists and has required parameters
+if let Some(info) = registry.get_tool_info("file_write") {
+    let required_params: Vec<_> = info.params
+        .iter()
+        .filter(|p| p.required)
+        .map(|p| &p.name)
+        .collect();
+    println!("file_write requires: {:?}", required_params);
+}
+```
+
+## Example: Complete Setup
+
+```rust
+use oneclaw_core::tool::ToolRegistry;
+use oneclaw_core::event_bus::DefaultEventBus;
+use oneclaw_tools::{SystemInfoTool, FileWriteTool, NotifyTool};
+use std::collections::HashMap;
+
+// Create registry and register tools
+let mut registry = ToolRegistry::new();
+registry.register(Box::new(SystemInfoTool::new()));
+registry.register(Box::new(FileWriteTool::new("/workspace")));
+registry.register(Box::new(NotifyTool::new()));
+
+println!("Registered {} tools", registry.count());
+
+// Create event bus for execution tracking
+let event_bus = DefaultEventBus::new();
+
+// Execute a tool
+let mut params = HashMap::new();
+params.insert("message".to_string(), "System started".to_string());
+params.insert("urgency".to_string(), "normal".to_string());
+
+let result = registry.execute("notify", &params, Some(&event_bus))?;
+assert!(result.success);
+
+// Check events
+let events = event_bus.recent_events(1)?;
+assert_eq!(events[0].topic, "tool.notify");
+```
+
+## Thread Safety
+
+`ToolRegistry` is `Send` but not `Sync`. To share across threads, wrap in `Arc<Mutex<ToolRegistry>>`:
+
+```rust
+use std::sync::{Arc, Mutex};
+
+let registry = Arc::new(Mutex::new(ToolRegistry::new()));
+
+// Register tools
+{
+    let mut reg = registry.lock().unwrap();
+    reg.register(Box::new(SystemInfoTool::new()));
+}
+
+// Execute from multiple threads
+let registry_clone = Arc::clone(&registry);
+std::thread::spawn(move || {
+    let reg = registry_clone.lock().unwrap();
+    reg.execute("system_info", &HashMap::new(), None)
+});
+```
+
+## See Also
+
+- [Tool Trait](/api/tools/traits) - Implementing custom tools
+- [Built-in Tools](/api/tools/built-in) - Standard tool implementations
+- [EventBus](/api/event-bus/traits) - Event emission system

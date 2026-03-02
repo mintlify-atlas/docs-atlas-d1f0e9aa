@@ -1,0 +1,746 @@
+---
+title: Security Model
+description: OneClaw's deny-by-default security architecture with device pairing and authorization
+---
+
+## Overview
+
+Security is **Layer 0** in OneClaw—the foundation upon which all other layers are built. The design follows a **deny-by-default** philosophy: all actions are blocked unless explicitly authorized.
+
+From `security/mod.rs:1`:
+
+```rust
+//! Layer 0: Security Core — Immune System
+//! Deny-by-default. Every action must be authorized.
+```
+
+## Core Principles
+
+<CardGroup cols={2}>
+  <Card title="Deny-by-Default" icon="ban">
+    All actions are blocked unless explicitly allowed
+  </Card>
+  <Card title="Device Pairing" icon="handshake">
+    One-time codes pair devices before interaction
+  </Card>
+  <Card title="Per-Command Authorization" icon="gavel">
+    Each command checks its own authorization
+  </Card>
+  <Card title="Rate Limiting" icon="gauge">
+    Prevent DoS attacks with request throttling
+  </Card>
+</CardGroup>
+
+## SecurityCore Trait
+
+Defined in `security/traits.rs:75`:
+
+```rust
+pub trait SecurityCore: Send + Sync {
+    /// Authorize an action. Deny-by-default.
+    fn authorize(&self, action: &Action) -> Result<Permit>;
+    
+    /// Check if a filesystem path is allowed
+    fn check_path(&self, path: &std::path::Path) -> Result<()>;
+    
+    /// Generate a one-time pairing code
+    fn generate_pairing_code(&self) -> Result<String>;
+    
+    /// Verify a pairing code and return device identity
+    fn verify_pairing_code(&self, code: &str) -> Result<Identity>;
+    
+    /// List all paired devices
+    fn list_devices(&self) -> Result<Vec<PairedDevice>>;
+    
+    /// Remove a paired device by device_id (exact or prefix match)
+    fn remove_device(&self, device_id_prefix: &str) -> Result<PairedDevice>;
+}
+```
+
+## Action Model
+
+Every operation is represented as an `Action` with:
+
+From `security/traits.rs:6`:
+
+```rust
+pub struct Action {
+    pub kind: ActionKind,      // What is being done
+    pub resource: String,      // What is being accessed
+    pub actor: String,         // Who is doing it
+}
+
+pub enum ActionKind {
+    Read,         // Read access to a resource
+    Write,        // Write access to a resource
+    Execute,      // Execute a command or tool
+    Network,      // Network access
+    PairDevice,   // Pair a new device
+}
+```
+
+### Authorization Example
+
+From `runtime.rs:263`:
+
+```rust
+fn check_auth(
+    &self,
+    kind: ActionKind,
+    resource: &str,
+    actor: &str,
+) -> Option<ProcessResult> {
+    let action = Action {
+        kind,
+        resource: resource.into(),
+        actor: actor.into(),
+    };
+    
+    match self.security.authorize(&action) {
+        Ok(permit) if permit.granted => {
+            Metrics::inc(&self.metrics.messages_secured);
+            None  // Allowed
+        }
+        Ok(permit) => {
+            Metrics::inc(&self.metrics.messages_denied);
+            Some(ProcessResult::Response(format!(
+                "Access denied: {:?} on '{}' — {}. Use 'pair' + 'verify CODE' to pair device.",
+                action.kind, resource, permit.reason
+            )))
+        }
+        Err(e) => Some(ProcessResult::Response(format!("Security error: {}", e))),
+    }
+}
+```
+
+Every secured command calls `check_auth()` before execution:
+
+```rust
+// Example: memory write requires authorization
+if content_lower.starts_with("remember ") {
+    if let Some(denied) = self.check_auth(ActionKind::Execute, "memory:write", actor) {
+        return denied;
+    }
+    // ... proceed with memory storage ...
+}
+```
+
+See `runtime.rs:745` for the actual implementation.
+
+## Device Pairing Flow
+
+OneClaw uses a **pairing flow** to establish trust between the agent and external devices:
+
+### Step 1: Generate Pairing Code
+
+From `security/pairing.rs`, the agent generates a 6-digit OTP:
+
+```bash
+> pair
+Pairing code: 582341 (valid 5 minutes)
+```
+
+Implementation in `security/default.rs:187`:
+
+```rust
+fn generate_pairing_code(&self) -> Result<String> {
+    self.pairing.generate()  // 6-digit numeric code
+}
+```
+
+The code is:
+- **Cryptographically random** (from `ring::rand::SystemRandom`)
+- **Time-limited** (default: 300 seconds)
+- **One-time use** (consumed on verification)
+
+### Step 2: Verify Pairing Code
+
+Client submits the code within TTL:
+
+```bash
+> verify 582341
+Device paired successfully!
+  Device ID: f3a2b1c0-8a4e-4d9f-b2c7-1e8f9a0b3c4d
+  Paired at: 2026-03-02 14:23:45 UTC
+  You can now interact with the agent.
+```
+
+Implementation in `security/default.rs:116`:
+
+```rust
+fn verify_and_grant(&self, code: &str) -> Result<Identity> {
+    // Step 1: Atomic verify (within PairingManager lock — marks code as used)
+    let identity = self.pairing.verify(code)?;
+    
+    // Step 2: Grant access (with poison recovery — must not fail after code consumed)
+    {
+        let mut devices = self.paired_devices.lock()
+            .unwrap_or_else(|e| e.into_inner());
+        devices.insert(identity.device_id.clone());
+    }
+    
+    // Step 3: Persist to SQLite if configured
+    if let Some(ref store) = self.persistence {
+        let device = PairedDevice::from_identity(&identity);
+        if let Err(e) = store.store_device(&device) {
+            tracing::warn!("Failed to persist device to SQLite: {}", e);
+        }
+    }
+    
+    // Step 3b: Legacy flat-file persistence (backward compat)
+    self.persist_registry();
+    
+    Ok(identity)
+}
+```
+
+<Warning>
+**Atomicity guarantee**: Once `pairing.verify()` succeeds, the code is marked as used **before** the device is granted access. This prevents double-spending of codes, even if a panic occurs during the grant phase.
+</Warning>
+
+### Step 3: Authorization
+
+Once paired, the device can perform actions:
+
+From `security/default.rs:146`:
+
+```rust
+fn authorize(&self, action: &Action) -> Result<Permit> {
+    // Deny-by-default: check pairing first (skip for PairDevice actions)
+    if self.pairing_required && !matches!(action.kind, ActionKind::PairDevice) {
+        let devices = self.paired_devices.lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if !devices.contains(&action.actor) && action.actor != "system" {
+            return Ok(Permit {
+                granted: false,
+                reason: format!("Device '{}' not paired. Pair first.", action.actor),
+            });
+        }
+    }
+    
+    // Action-specific checks
+    match &action.kind {
+        ActionKind::PairDevice => {
+            Ok(Permit { granted: true, reason: "Pairing action allowed".into() })
+        }
+        ActionKind::Read | ActionKind::Write => {
+            let path = std::path::Path::new(&action.resource);
+            match self.path_guard.check(path) {
+                Ok(()) => Ok(Permit { granted: true, reason: "Path check passed".into() }),
+                Err(e) => Ok(Permit { granted: false, reason: format!("{}", e) }),
+            }
+        }
+        ActionKind::Execute => {
+            Ok(Permit { granted: true, reason: "Execution allowed for paired device".into() })
+        }
+        ActionKind::Network => {
+            Ok(Permit { granted: true, reason: "Network allowed for paired device".into() })
+        }
+    }
+}
+```
+
+## Paired Device Management
+
+### Listing Devices
+
+```bash
+> devices
+Paired Devices (2):
+  f3a2b1c0 | paired: 2026-03-02 14:23 | seen: 2026-03-02 15:30
+  8e7d2c4f | paired: 2026-03-01 09:15 | seen: 2026-03-02 15:25 | Raspberry Pi
+```
+
+From `security/traits.rs:49`:
+
+```rust
+pub struct PairedDevice {
+    pub device_id: String,
+    pub paired_at: DateTime<Utc>,
+    pub label: String,           // Optional human-readable label
+    pub last_seen: DateTime<Utc>,
+}
+```
+
+### Removing Devices
+
+Supports **prefix matching** for convenience:
+
+```bash
+> unpair f3a2
+Device unpaired: f3a2b1c0-8a4e-4d9f-b2c7-1e8f9a0b3c4d
+  Was paired since: 2026-03-02 14:23:45 UTC
+```
+
+From `security/default.rs:211`, prefix matching with ambiguity detection:
+
+```rust
+fn remove_device(&self, device_id_prefix: &str) -> Result<PairedDevice> {
+    if let Some(ref store) = self.persistence {
+        let matches = store.find_by_prefix(device_id_prefix)?;
+        match matches.len() {
+            0 => Err(OneClawError::Security(
+                format!("No device matching '{}'", device_id_prefix)
+            )),
+            1 => {
+                let device = matches.into_iter().next().unwrap();
+                store.remove_device(&device.device_id)?;
+                // Also remove from in-memory cache
+                if let Ok(mut devices) = self.paired_devices.lock() {
+                    devices.remove(&device.device_id);
+                }
+                Ok(device)
+            }
+            n => Err(OneClawError::Security(format!(
+                "Ambiguous: '{}' matches {} devices. Use longer prefix.",
+                device_id_prefix, n
+            ))),
+        }
+    } else {
+        // Fallback: search in-memory
+        // ...
+    }
+}
+```
+
+## Filesystem Scoping
+
+OneClaw restricts filesystem access to a **workspace directory** via `PathGuard`.
+
+From `security/path_guard.rs`:
+
+```rust
+pub struct PathGuard {
+    workspace: PathBuf,
+    workspace_only: bool,
+}
+
+impl PathGuard {
+    pub fn check(&self, path: &Path) -> Result<()> {
+        let canonical = path.canonicalize()
+            .map_err(|e| OneClawError::Security(
+                format!("Invalid path: {}", e)
+            ))?;
+        
+        if self.workspace_only && !canonical.starts_with(&self.workspace) {
+            return Err(OneClawError::Security(format!(
+                "Path outside workspace: {}",
+                canonical.display()
+            )));
+        }
+        
+        Ok(())
+    }
+}
+```
+
+### Example: Blocked Path Access
+
+From `security/default.rs:330` (test):
+
+```rust
+#[test]
+fn test_blocked_path_denied_even_for_paired() {
+    let sec = test_security();
+    
+    // Pair a device
+    let code = sec.generate_pairing_code().unwrap();
+    let identity = sec.verify_pairing_code(&code).unwrap();
+    
+    // Try to access /etc/passwd
+    let action = Action {
+        kind: ActionKind::Read,
+        resource: "/etc/passwd".into(),
+        actor: identity.device_id,
+    };
+    let permit = sec.authorize(&action).unwrap();
+    assert!(!permit.granted);  // Blocked: outside workspace
+}
+```
+
+## Rate Limiting
+
+OneClaw includes a **RateLimiter** to prevent DoS attacks.
+
+From `security/rate_limit.rs`:
+
+```rust
+pub struct RateLimiter {
+    max_per_minute: u32,
+    window: Mutex<Window>,
+}
+
+struct Window {
+    start: Instant,
+    count: u32,
+}
+
+impl RateLimiter {
+    pub fn new(max_per_minute: u32) -> Self {
+        Self {
+            max_per_minute,
+            window: Mutex::new(Window {
+                start: Instant::now(),
+                count: 0,
+            }),
+        }
+    }
+    
+    pub fn check(&self) -> bool {
+        let mut window = self.window.lock().unwrap();
+        
+        // Reset window after 60 seconds
+        if window.start.elapsed() > Duration::from_secs(60) {
+            window.start = Instant::now();
+            window.count = 0;
+        }
+        
+        window.count += 1;
+        window.count <= self.max_per_minute
+    }
+}
+```
+
+Used in `runtime.rs:507`:
+
+```rust
+// Rate limit check (after open commands, before authorization)
+if !self.rate_limiter.check() {
+    Metrics::inc(&self.metrics.messages_rate_limited);
+    return ProcessResult::Response(
+        "Too many requests. Please wait a moment.".into()
+    );
+}
+```
+
+Default: **60 requests per minute** (from `runtime.rs:78`).
+
+## Always-Open Commands
+
+Certain commands bypass authorization to allow initial interaction:
+
+From `runtime.rs:448`:
+
+```rust
+// === ALWAYS OPEN (no security check) ===
+
+if content_lower == "exit" || content_lower == "quit" || content_lower == "q" {
+    return ProcessResult::Exit("Goodbye!".into());
+}
+
+if content_lower == "help" {
+    return ProcessResult::Response("...".into());
+}
+
+if content_lower == "pair" {
+    let response = match self.security.generate_pairing_code() {
+        Ok(code) => format!("Pairing code: {} (valid 5 minutes)", code),
+        Err(e) => format!("Failed to generate pairing code: {}", e),
+    };
+    return ProcessResult::Response(response);
+}
+
+if content_lower.starts_with("verify ") {
+    let code = message.content.trim()[7..].trim();
+    let response = match self.security.verify_pairing_code(code) {
+        Ok(identity) => {
+            // Map channel source to device ID
+            if let Ok(mut map) = self.source_device_map.lock() {
+                map.insert(message.source.clone(), identity.device_id.clone());
+            }
+            format!("Device paired successfully!\n  Device ID: {}\n  ...", identity.device_id)
+        }
+        Err(e) => format!("Pairing failed: {}", e),
+    };
+    return ProcessResult::Response(response);
+}
+```
+
+<Info>
+**Why always-open?** Users must be able to pair their device before authorization can work. These four commands (`exit`, `help`, `pair`, `verify`) form the **bootstrap protocol**.
+</Info>
+
+## Per-Command Authorization
+
+Unlike session-based authentication, OneClaw checks authorization **for every command**.
+
+From `runtime.rs:527`:
+
+```rust
+async fn dispatch_secured_command(
+    &self,
+    message: &IncomingMessage,
+    content_lower: &str,
+    actor: &str,
+) -> ProcessResult {
+    // Every command checks its own authorization
+    
+    if content_lower == "metrics" {
+        if let Some(denied) = self.check_auth(ActionKind::Execute, "system:metrics", actor) {
+            return denied;
+        }
+        return ProcessResult::Response(self.metrics.report());
+    }
+    
+    if content_lower.starts_with("remember ") {
+        if let Some(denied) = self.check_auth(ActionKind::Execute, "memory:write", actor) {
+            return denied;
+        }
+        // ... store memory ...
+    }
+    
+    if content_lower.starts_with("tool ") {
+        let tool_name = /* ... */;
+        let resource = format!("tool:{}", tool_name);
+        if let Some(denied) = self.check_auth(ActionKind::Execute, &resource, actor) {
+            return denied;
+        }
+        // ... execute tool ...
+    }
+    
+    // Default: LLM pipeline
+    if let Some(denied) = self.check_auth(ActionKind::Execute, "llm", actor) {
+        return denied;
+    }
+    ProcessResult::Response(self.process_with_llm(&message.content))
+}
+```
+
+This provides **fine-grained control**:
+- Block memory writes but allow reads
+- Allow specific tools only
+- Disable LLM access but allow metrics
+
+## Security Configuration
+
+### Production Mode
+
+From `security/default.rs:52`:
+
+```rust
+pub fn production(workspace: impl Into<PathBuf>) -> Self {
+    Self::new(
+        workspace,
+        true,   // workspace_only: true
+        true,   // pairing_required: true
+        300,    // pairing_code_ttl_seconds: 5 minutes
+    )
+}
+```
+
+Configuration in `config/oneclaw.toml`:
+
+```toml
+[security]
+deny_by_default = true
+workspace = "/opt/oneclaw/workspace"  # Filesystem scope
+
+[security.pairing]
+required = true
+code_ttl_seconds = 300
+
+[security.persistence]
+type = "sqlite"
+path = "/opt/oneclaw/security.db"
+```
+
+### Development Mode
+
+From `security/default.rs:58`:
+
+```rust
+pub fn development(workspace: impl Into<PathBuf>) -> Self {
+    Self::new(
+        workspace,
+        true,    // workspace_only: true (still scoped)
+        false,   // pairing_required: false (no pairing)
+        3600,    // pairing_code_ttl_seconds: 1 hour
+    )
+}
+```
+
+<Warning>
+**Development mode disables pairing**, allowing any device to interact. Use only in trusted environments.
+</Warning>
+
+## Persistent Device Registry
+
+Paired devices survive restarts via SQLite persistence.
+
+From `security/persistence.rs`:
+
+```rust
+pub struct SqliteSecurityStore {
+    conn: Mutex<Connection>,
+}
+
+impl SqliteSecurityStore {
+    pub fn new(path: &str) -> Result<Self> {
+        let conn = Connection::open(path)?;
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS paired_devices (
+                device_id TEXT PRIMARY KEY,
+                paired_at TEXT NOT NULL,
+                label TEXT NOT NULL,
+                last_seen TEXT NOT NULL
+            )",
+            [],
+        )?;
+        Ok(Self { conn: Mutex::new(conn) })
+    }
+    
+    pub fn store_device(&self, device: &PairedDevice) -> Result<()> { /* ... */ }
+    pub fn load_device_ids(&self) -> Result<Vec<String>> { /* ... */ }
+    pub fn find_by_prefix(&self, prefix: &str) -> Result<Vec<PairedDevice>> { /* ... */ }
+    pub fn remove_device(&self, device_id: &str) -> Result<()> { /* ... */ }
+}
+```
+
+From `security/default.rs:84`, devices are loaded on boot:
+
+```rust
+pub fn with_persistence(mut self, store: SqliteSecurityStore) -> Self {
+    // Load existing paired devices from SQLite into in-memory cache
+    if let Ok(ids) = store.load_device_ids()
+        && let Ok(mut devices) = self.paired_devices.lock()
+    {
+        for id in &ids {
+            devices.insert(id.clone());
+        }
+        if !ids.is_empty() {
+            tracing::info!(count = ids.len(), "Loaded paired devices from SQLite");
+        }
+    }
+    self.persistence = Some(store);
+    self
+}
+```
+
+## Security Testing
+
+From `security/default.rs:262` (tests):
+
+```rust
+#[test]
+fn test_unpaired_device_denied() {
+    let sec = test_security();
+    let action = Action {
+        kind: ActionKind::Read,
+        resource: ".".into(),
+        actor: "unknown-device".into(),
+    };
+    let permit = sec.authorize(&action).unwrap();
+    assert!(!permit.granted);
+    assert!(permit.reason.contains("not paired"));
+}
+
+#[test]
+fn test_full_pairing_flow() {
+    let sec = test_security();
+    
+    // 1. Generate code
+    let code = sec.generate_pairing_code().unwrap();
+    assert_eq!(code.len(), 6);
+    
+    // 2. Verify code -> get identity
+    let identity = sec.verify_pairing_code(&code).unwrap();
+    
+    // 3. Now device can perform actions
+    let action = Action {
+        kind: ActionKind::Read,
+        resource: env::current_dir().unwrap().join("Cargo.toml").to_string_lossy().into(),
+        actor: identity.device_id.clone(),
+    };
+    let permit = sec.authorize(&action).unwrap();
+    assert!(permit.granted);
+}
+
+#[test]
+fn test_system_actor_bypasses_pairing() {
+    let sec = test_security();
+    let action = Action {
+        kind: ActionKind::Execute,
+        resource: "internal".into(),
+        actor: "system".into(),
+    };
+    let permit = sec.authorize(&action).unwrap();
+    assert!(permit.granted);
+}
+```
+
+## Security Metrics
+
+From `metrics.rs`, security operations are tracked:
+
+```rust
+pub struct Metrics {
+    pub messages_secured: AtomicU64,       // Authorized messages
+    pub messages_denied: AtomicU64,        // Blocked by security
+    pub messages_rate_limited: AtomicU64,  // Throttled
+    // ...
+}
+```
+
+View with `metrics` command:
+
+```bash
+> metrics
+Operational Metrics:
+  Messages:
+    Total: 1,234
+    Secured: 1,180
+    Denied: 42
+    Rate Limited: 12
+  ...
+```
+
+## Security Checklist
+
+When deploying OneClaw in production:
+
+<Steps>
+  <Step title="Enable Production Security">
+    Use `DefaultSecurity::production(workspace)` or set `deny_by_default = true` in config.
+  </Step>
+  
+  <Step title="Configure Workspace Scope">
+    Set `workspace` to a dedicated directory (e.g., `/opt/oneclaw/workspace`).
+  </Step>
+  
+  <Step title="Enable Device Pairing">
+    Set `pairing_required = true` in `[security]` config.
+  </Step>
+  
+  <Step title="Persist Paired Devices">
+    Use SQLite persistence with `SqliteSecurityStore` to survive restarts.
+  </Step>
+  
+  <Step title="Set Rate Limits">
+    Configure `RateLimiter` based on expected load (default: 60/min).
+  </Step>
+  
+  <Step title="Monitor Security Metrics">
+    Check `messages_denied` and `messages_rate_limited` regularly.
+  </Step>
+  
+  <Step title="Review Paired Devices">
+    Use `devices` command to audit paired devices. Remove stale devices with `unpair`.
+  </Step>
+</Steps>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Architecture" icon="sitemap" href="/concepts/architecture">
+    How security fits into the 6-layer architecture
+  </Card>
+  <Card title="Layer Details" icon="layer-group" href="/concepts/layers">
+    Deep dive into all layers including L0
+  </Card>
+  <Card title="Deployment Guide" icon="server" href="/guides/deployment">
+    Deploying OneClaw securely on edge devices
+  </Card>
+  <Card title="Configuration" icon="gear" href="/reference/configuration">
+    Security configuration reference
+  </Card>
+</CardGroup>
