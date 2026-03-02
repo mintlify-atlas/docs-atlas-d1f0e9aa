@@ -1,0 +1,179 @@
+{
+  "projectType": "framework",
+  "projectName": "OneClaw",
+  "projectDescription": "Lightweight AI agent kernel for edge/IoT with 6-layer architecture and multi-provider LLM orchestration",
+  "theme": "aspen",
+  "primaryColor": "#E67E22",
+  "lightColor": "#F39C12",
+  "darkColor": "#D35400",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "installation"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/architecture",
+              "concepts/layers",
+              "concepts/traits",
+              "concepts/security"
+            ]
+          },
+          {
+            "group": "Configuration",
+            "pages": [
+              "configuration/overview",
+              "configuration/providers",
+              "configuration/embedding",
+              "configuration/security"
+            ]
+          },
+          {
+            "group": "Deployment",
+            "pages": [
+              "deployment/edge-devices",
+              "deployment/raspberry-pi",
+              "deployment/cross-compile",
+              "deployment/systemd"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/llm-providers",
+              "guides/memory-search",
+              "guides/event-bus",
+              "guides/custom-tools",
+              "guides/custom-channels"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Core Runtime",
+            "pages": [
+              "api/runtime",
+              "api/config",
+              "api/metrics"
+            ]
+          },
+          {
+            "group": "Layer 0: Security",
+            "pages": [
+              "api/security/traits",
+              "api/security/authorization",
+              "api/security/pairing"
+            ]
+          },
+          {
+            "group": "Layer 1: Orchestrator",
+            "pages": [
+              "api/orchestrator/router",
+              "api/orchestrator/context",
+              "api/orchestrator/chain"
+            ]
+          },
+          {
+            "group": "Layer 2: Memory",
+            "pages": [
+              "api/memory/traits",
+              "api/memory/sqlite",
+              "api/memory/vector"
+            ]
+          },
+          {
+            "group": "Layer 3: Event Bus",
+            "pages": [
+              "api/event-bus/traits",
+              "api/event-bus/sync",
+              "api/event-bus/async",
+              "api/event-bus/pipeline"
+            ]
+          },
+          {
+            "group": "Layer 4: Tools",
+            "pages": [
+              "api/tools/traits",
+              "api/tools/registry",
+              "api/tools/built-in"
+            ]
+          },
+          {
+            "group": "Layer 5: Channels",
+            "pages": [
+              "api/channels/traits",
+              "api/channels/manager",
+              "api/channels/implementations"
+            ]
+          },
+          {
+            "group": "Providers",
+            "pages": [
+              "api/providers/traits",
+              "api/providers/llm",
+              "api/providers/embedding",
+              "api/providers/fallback"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "CLI Reference",
+        "groups": [
+          {
+            "group": "Commands",
+            "pages": [
+              "cli/overview",
+              "cli/system",
+              "cli/memory",
+              "cli/llm",
+              "cli/tools",
+              "cli/channels"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "6-layer trait-driven architecture (Security, Orchestrator, Memory, Event Bus, Tools, Channels)",
+    "Multi-provider LLM support with automatic fallback (Anthropic, OpenAI, DeepSeek, Groq, Gemini, Ollama)",
+    "Hybrid memory search combining SQLite FTS5, vector embeddings, and reciprocal rank fusion",
+    "Edge-optimized runtime (<5MB binary, <10ms boot, 3.8M messages/sec throughput)",
+    "Deny-by-default security with device pairing and per-command authorization",
+    "Multi-channel I/O (CLI, TCP, Telegram, MQTT) with round-robin management",
+    "Sync and async event bus implementations for realtime event processing",
+    "Extensible tool system with sandboxed execution",
+    "Cross-platform ARM/x86_64 support with systemd deployment"
+  ],
+  "publicApiSurface": [
+    "Runtime",
+    "SecurityCore trait",
+    "ModelRouter trait",
+    "ContextManager trait",
+    "ChainExecutor trait",
+    "Memory trait",
+    "VectorMemory trait",
+    "EventBus trait",
+    "Tool trait",
+    "Channel trait",
+    "Provider trait",
+    "EmbeddingProvider trait",
+    "ToolRegistry",
+    "ChannelManager",
+    "OneClawConfig",
+    "Metrics"
+  ]
+}
